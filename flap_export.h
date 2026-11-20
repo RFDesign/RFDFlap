@@ -1,0 +1,71 @@
+#if !defined(__FLAP_EXPORT_H__)
+#define __FLAP_EXPORT_H__
+
+#include "nc_types.h"
+#include "nc_math.h"
+#include "nc_string.h"
+#include "nc_system.h"
+
+#include "flap_widgets.h"
+
+struct Arena;
+struct FLAPTableParams;
+struct FLAPExportSource;
+struct FLAPExportWriter;
+
+// @defines____________________________________________________________________
+#define FLAP_EXPORT_CHUNK_SIZE MB(1)
+
+typedef u32 FLAPExportKind;
+enum : u32 {
+    FLAP_EXPORT_KIND_NULL,
+    FLAP_EXPORT_KIND_PNG,
+    FLAP_EXPORT_KIND_CSV,
+    FLAP_EXPORT_KIND_TXT,
+    FLAP_EXPORT_KIND_COUNT
+};
+
+// NOTE(nc): an export function makes the bytes of the file, as a list of
+//         : blobs in MemPool. it does not open a file. FLAPExport writes
+//         : the blobs, so a large export is never one string.
+#define FLAP_EXPORT_FUNC_DEF(X) b32 X(Arena* MemPool, FLAPExportSource const* Source, FLAPExportWriter* Writer)
+#define FLAP_EXPORT_FUNC_NAME(X) __FlapExportFunc##X
+#define FLAP_EXPORT_FUNC_SIG(X) FLAP_EXPORT_FUNC_DEF(FLAP_EXPORT_FUNC_NAME(X))
+typedef FLAP_EXPORT_FUNC_DEF(FLAPExportFuncType);
+
+// @types______________________________________________________________________
+// NOTE(nc): what there is to export. an export function reads the part
+//         : that is for its kind. Pixels is RGBA, the top row first.
+struct FLAPExportSource {
+    u8*              Pixels;
+    FLAPTableParams* Table;
+    v2i32            Size;
+};
+
+struct FLAPExportWriter {
+    Handle File;
+    u8*    Chunk;
+    u64    Size;
+    u64    Capacity;
+    u64    Offset;
+    b32    HasFailed;
+    u32    __Padding;
+};
+
+typedef FLAP_EXPORT_FUNC_SIG(FLAPExportFunc);
+
+// @runtime____________________________________________________________________
+extern Str8 FLAP_EXPORT_KIND_EXTENSION_TABLE[FLAP_EXPORT_KIND_COUNT];
+extern FLAPExportFuncType* FLAP_EXPORT_KIND_FUNC_TABLE[FLAP_EXPORT_KIND_COUNT];
+
+// @functions__________________________________________________________________
+void FLAPExportFlush(FLAPExportWriter* Writer);
+void FLAPExportWrite(FLAPExportWriter* Writer, Str8 String);
+void FLAPExportTableRow(Arena* MemPool, FLAPTableCtx* Ctx, u64 Row, OUT Str8* Cells, OUT u64* TimeUSecs);
+b32 FLAPExport(FLAPExportKind Kind, FLAPExportSource const* Source, Str8 FilePath);
+
+FLAP_EXPORT_FUNC_SIG(PNG);
+FLAP_EXPORT_FUNC_SIG(CSV);
+FLAP_EXPORT_FUNC_SIG(TXT);
+
+#endif // __FLAP_EXPORT_H__
