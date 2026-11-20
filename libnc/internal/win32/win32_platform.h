@@ -1516,6 +1516,7 @@ typedef LONG                    LSTATUS;
 typedef DWORD                   ACCESS_MASK;
 typedef ACCESS_MASK             REGSAM;
 typedef LONG                    FXPT2DOT30;
+typedef UINT                    MMRESULT;
 
 #if defined(_WIN64)
     typedef UINT_PTR            SOCKET;
@@ -3352,6 +3353,7 @@ DLL_IMPORT                    USHORT                    WSAAPI  htons(USHORT hos
 DLL_IMPORT                    USHORT                    WSAAPI  ntohs(USHORT networkshort);
 DLL_IMPORT                    INT                       WSAAPI  WSACleanup(VOID);
 DLL_IMPORT                    INT                       WSAAPI  ioctlsocket(SOCKET s, LONG cmd, ULONG* argp);
+DLL_IMPORT                    BOOL                      WINAPI  IsDebuggerPresent(VOID);
 DLL_IMPORT                    HINTERNET                         WinHttpOpen(LPCWSTR pszAgentW, DWORD dwAccessType, LPCWSTR pszProxyW, LPCWSTR pszProxyBypassW, DWORD dwFlags);
 DLL_IMPORT                    WINHTTP_STATUS_CALLBACK           WinHttpSetStatusCallback(HINTERNET hInternet, WINHTTP_STATUS_CALLBACK lpfnInternetCallback, DWORD dwNotificationFlags, DWORD_PTR dwReserved);
 DLL_IMPORT                    HINTERNET                         WinHttpConnect(HINTERNET hSession, LPCWSTR pswzServerName, INTERNET_PORT nServerPort, DWORD dwReserved);
@@ -3362,6 +3364,8 @@ DLL_IMPORT                    BOOL                              WinHttpQueryHead
 DLL_IMPORT                    BOOL                              WinHttpQueryDataAvailable(HINTERNET hRequest, LPDWORD lpdwNumberOfBytesAvailable);
 DLL_IMPORT                    BOOL                              WinHttpReadData(HINTERNET hRequest, LPVOID lpBuffer, DWORD dwNumberOfBytesToRead, LPDWORD lpdwNumberOfBytesRead);
 DLL_IMPORT                    BOOL                              WinHttpCloseHandle(HINTERNET hInternet);
+DLL_IMPORT                    MMRESULT                     WINAPI  timeBeginPeriod(UINT uPeriod);
+DLL_IMPORT                    MMRESULT                     WINAPI  timeEndPeriod(UINT uPeriod);
 EXTERN_C_LINK_END
 
 // @runtime____________________________________________________________________
@@ -3479,6 +3483,75 @@ IMAGE_TLS_DIRECTORY64 _tls_used = {
 };
 
 #pragma const_seg()
+
+typedef void (*_PVFV)(void);
+typedef int (*_PIFV)(void);
+
+#pragma section(".CRT$XIA",long,read)
+__declspec(allocate(".CRT$XIA")) _PIFV __xi_a[] = { 0 };
+
+#pragma section(".CRT$XIZ",long,read)
+__declspec(allocate(".CRT$XIZ")) _PIFV __xi_z[] = { 0 };
+
+#pragma section(".CRT$XCA",long,read)
+__declspec(allocate(".CRT$XCA")) _PVFV __xc_a[] = { 0 };
+
+#pragma section(".CRT$XCZ",long,read)
+__declspec(allocate(".CRT$XCZ")) _PVFV __xc_z[] = { 0 };
+
+#pragma section(".CRT$XPA",long,read)
+__declspec(allocate(".CRT$XPA")) _PVFV __xp_a[] = { 0 };
+
+#pragma section(".CRT$XPZ",long,read)
+__declspec(allocate(".CRT$XPZ")) _PVFV __xp_z[] = { 0 };
+
+#pragma section(".CRT$XTA",long,read)
+__declspec(allocate(".CRT$XTA")) _PVFV __xt_a[] = { 0 };
+
+#pragma section(".CRT$XTZ",long,read)
+__declspec(allocate(".CRT$XTZ")) _PVFV __xt_z[] = { 0 };
 EXTERN_C_LINK_END
+
+internal void
+__WIN32CRTCall(_PIFV* _A, _PIFV* _B)
+{
+    while (_A != _B) {
+        if (*_A) {
+            if ((**_A)()) {
+                if (IsDebuggerPresent())
+                    __debugbreak();
+
+                ExitProcess(0);
+            }
+        }
+
+        ++_A;
+    }
+}
+
+internal void
+__WIN32CRTCall(_PVFV* _A, _PVFV* _B)
+{
+    while (_A != _B) {
+        if (*_A)
+            (**_A)();
+
+        ++_A;
+    }
+}
+
+internal void
+__WIN32CRTInit(void)
+{
+    __WIN32CRTCall(__xi_a, __xi_z);
+    __WIN32CRTCall(__xc_a, __xc_z);
+}
+
+internal void
+__WIN32CRTDone(void)
+{
+    __WIN32CRTCall(__xp_a, __xp_z);
+    __WIN32CRTCall(__xt_a, __xt_z);
+}
 
 #endif // __WIN32_PLATFORM_H__

@@ -8,9 +8,11 @@ IOHandles IO_HANDLES = {};
 void
 PrintInit(void)
 {
+#if !defined(NC_FLI)
     if (!AllocConsole()) {
         return;
     }
+#endif
 
     HANDLE Out = GetStdHandle(PRINT_STDOUT_FILENO);
     HANDLE Err = GetStdHandle(PRINT_STDERR_FILENO);
@@ -45,7 +47,9 @@ PrintInit(void)
 void
 PrintRelease(void)
 {
+#if !defined(NC_FLI)
     FreeConsole();
+#endif
 }
 
 void 

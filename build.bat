@@ -3,8 +3,8 @@ setlocal enabledelayedexpansion
 
 set BuildMode=debug
 set FLIDefine=
-set SubSystem=/SUBSYSTEM:WINDOWS
-set EntryPoint=/ENTRY:wWinMainCRTStartup
+set SubSystem=
+set EntryPoint=
 set GuiDefine=/DNC_USE_DX11 /DNC_USE_DWRITE
 set DataDirDefine=/DNC_DATA_DIR=\"flap_gui\"
 
@@ -56,10 +56,14 @@ if defined FLIDefine (
     set OutputExe=fli.exe
     set OutputPdb=fli.pdb
     set OutputMap=fli.map
+    set EntryPoint=/ENTRY:wmainCRTStartup
+    set SubSystem=/SUBSYSTEM:CONSOLE
 ) else (
     set OutputExe=flap.exe
     set OutputPdb=flap.pdb
     set OutputMap=flap.map
+    set EntryPoint=/ENTRY:wWinMainCRTStartup
+    set SubSystem=/SUBSYSTEM:WINDOWS
 )
 
 set SharedCompilerFlags=^

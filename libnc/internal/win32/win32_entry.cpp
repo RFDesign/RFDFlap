@@ -445,44 +445,79 @@ EntryPointCaller(int ArgC, WCHAR** WArgV)
     MainThreadBaseEntryPoint(ArgC, ArgV);
 }
 
-EXTERN_C_LINK INT
-wWinMain(
-    HINSTANCE hInstance, 
-    HINSTANCE hPrevInstance, 
-    LPWSTR lpCmdLine, 
-    INT nShowCmd
-) { 
-    INT ArgC;
-    WCHAR** WArgV;
+#if defined(NC_FLI)
+    EXTERN_C_LINK INT
+    wmain(INT ArgC, WCHAR** WArgV)
+    {
+        timeBeginPeriod(1);
+        PrintInit();
+        EntryPointCaller(ArgC, WArgV);
+        PrintRelease();
+        timeEndPeriod(1);
 
-#if defined(NC_DEBUG)
-    PrintInit();
+        return 0;
+    }
+
+    EXTERN_C_LINK VOID
+    wmainCRTStartup(VOID)
+    {
+        __WIN32CRTInit();
+
+        INT ArgC;
+        WCHAR** WArgV;
+
+        WArgV = CommandLineToArgvW(GetCommandLineW(), &ArgC);
+
+        INT MainResult = wmain(ArgC, WArgV);
+
+        LocalFree(WArgV);
+        __WIN32CRTDone();
+        ExitProcess(MainResult);
+    }
+#else
+    EXTERN_C_LINK INT
+    wWinMain(
+        HINSTANCE hInstance, 
+        HINSTANCE hPrevInstance, 
+        LPWSTR lpCmdLine, 
+        INT nShowCmd
+    ) { 
+        INT ArgC;
+        WCHAR** WArgV;
+
+        timeBeginPeriod(1);
+
+    #if defined(NC_DEBUG)
+        PrintInit();
+    #endif
+
+        WArgV = CommandLineToArgvW(GetCommandLineW(), &ArgC);
+        EntryPointCaller(ArgC, WArgV);
+
+    #if defined(NC_DEBUG)
+        PrintRelease();
+    #endif
+
+        timeEndPeriod(1);
+
+        return 0;
+    }
+
+    EXTERN_C_LINK VOID
+    wWinMainCRTStartup(VOID)
+    {
+        INT ArgC;
+        WCHAR** WArgV;
+
+        WArgV = CommandLineToArgvW(GetCommandLineW(), &ArgC);
+
+        // WARN: need to get our module, but this assumes WArgV is NOT empty
+        HMODULE CurrentInstance = GetModuleHandleW(NULL);
+        INT MainResult = wWinMain(CurrentInstance, NULL, NULL, 0);
+
+        ExitProcess(MainResult);
+    }
 #endif
-
-    WArgV = CommandLineToArgvW(GetCommandLineW(), &ArgC);
-    EntryPointCaller(ArgC, WArgV);
-
-#if defined(NC_DEBUG)
-    PrintRelease();
-#endif
-
-    return 0;
-}
-
-EXTERN_C_LINK VOID
-wWinMainCRTStartup(VOID)
-{
-    INT ArgC;
-    WCHAR** WArgV;
-
-    WArgV = CommandLineToArgvW(GetCommandLineW(), &ArgC);
-
-    // WARN: need to get our module, but this assumes WArgV is NOT empty
-    HMODULE CurrentInstance = GetModuleHandleW(NULL);
-    INT MainResult = wWinMain(CurrentInstance, NULL, NULL, 0);
-
-    ExitProcess(MainResult);
-}
 
 EXTERN_C_LINK VOID NTAPI
 tls_callback(HMODULE hModule, DWORD dwReason, LPVOID dwReserved)
