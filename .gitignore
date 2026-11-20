@@ -7,7 +7,6 @@ build/
 *.lib
 *.exp
 *.def
-*.res
 *.ilk
 *.dll
 *.so
