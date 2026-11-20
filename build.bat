@@ -2,6 +2,7 @@
 setlocal enabledelayedexpansion
 
 set BuildMode=debug
+set FLIDefine=
 set SubSystem=/SUBSYSTEM:WINDOWS
 set EntryPoint=/ENTRY:wWinMainCRTStartup
 set GuiDefine=/DNC_USE_DX11 /DNC_USE_DWRITE
@@ -12,6 +13,7 @@ for %%a in (%*) do (
 
     if /I "!Arg!"=="release" set BuildMode=release
     if /I "!Arg!"=="dev"     set BuildMode=dev
+    if /I "!Arg!"=="fli"     set FLIDefine=/DNC_FLI
 )
 
 if not exist build mkdir build
@@ -48,10 +50,17 @@ set BSWAPASMOutputObj=win32_bswap.obj
 set MATHASMOutputObj=win32_math.obj
 set INTRINASMOutputObj=win32_intrin.obj
 
-set SourceFiles=..\flap_gui.cpp
-set OutputExe=flap_gui.exe
-set OutputPdb=flap_gui.pdb
-set OutputMap=flap_gui.map
+set SourceFiles=..\flap.cpp
+
+if defined FLIDefine (
+    set OutputExe=fli.exe
+    set OutputPdb=fli.pdb
+    set OutputMap=fli.map
+) else (
+    set OutputExe=flap.exe
+    set OutputPdb=flap.pdb
+    set OutputMap=flap.map
+)
 
 set SharedCompilerFlags=^
     /nologo /FC /WX /W4 /GR- /Gm- /EHa- /EHsc- /Zl ^
@@ -149,7 +158,7 @@ goto :invalid_mode
     )
 
     echo.[33m____compiling_and_linking____[0m
-    cl.exe %SharedCompilerFlags% %ConfigCompilerFlags% %DataDirDefine% %GuiDefine% %SourceFiles% %CHKSTKASMOutputObj% %BSWAPASMOutputObj% %MATHASMOutputObj% %INTRINASMOutputObj% /Fm%OutputMap% /link %SharedLinkerFlags% %ConfigLinkerFlags% /OUT:%OutputExe% /PDB:%OutputPdb%
+    cl.exe %SharedCompilerFlags% %ConfigCompilerFlags% %FLIDefine% %DataDirDefine% %GuiDefine% %SourceFiles% %CHKSTKASMOutputObj% %BSWAPASMOutputObj% %MATHASMOutputObj% %INTRINASMOutputObj% /Fm%OutputMap% /link %SharedLinkerFlags% %ConfigLinkerFlags% /OUT:%OutputExe% /PDB:%OutputPdb%
 
     set LastError=%ERRORLEVEL%
     if not %LastError% == 0 (

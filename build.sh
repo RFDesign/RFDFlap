@@ -6,6 +6,7 @@ GREEN='\033[0;32m'
 RESET='\033[0;0m'
 
 BuildMode="debug"
+FLIDefine=""
 GuiDefine="-DNC_GUI=1 -DNC_USE_OPENGL -DNC_USE_OPENGL_GLX -DNC_USE_FREETYPE -DNC_SLOW_FLOATS"
 
 for arg in "$@"; do
@@ -15,6 +16,9 @@ for arg in "$@"; do
             ;;
         dev)
             BuildMode="dev"
+            ;;
+        fli)
+            FLIDefine="-DNC_FLI=1"
             ;;
     esac
 done
@@ -28,8 +32,13 @@ ASMFlags="-f elf64"
 MATHASMOutputObj=linux_math.o
 INTRINASMOutputObj=linux_intrin.o
 
-SourceFiles="../flap_gui.cpp"
-OutputBin="flap_gui"
+SourceFiles="../flap.cpp"
+
+if [ -n "$FLIDefine" ]; then
+    OutputBin="fli"
+else
+    OutputBin="flap"
+fi
 
 SharedCompilerFlags=(
     "-std=c++14"

@@ -3471,6 +3471,9 @@ ASYNC_THREAD_FUNC_SIG(EntryPoint)
 void
 EntryPoint(CommandLine* CLI)
 {
+#if defined(NC_FLI)
+    FLIEntryPoint(CLI);
+#else
     // HTTPInit();
     MDInit();
     ConfigInit();
@@ -3480,4 +3483,5 @@ EntryPoint(CommandLine* CLI)
 
     for (; !APP_STATE->Quit; )
         Frame();
+#endif
 }
