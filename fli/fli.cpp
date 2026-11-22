@@ -934,27 +934,24 @@ FLIAsyncTick(void)
                 if (OriginalIsOkay && ReadyToLaunchConversion) {
                     b32 ShouldCompress = FALSE;
                     ProcessLaunchProperties Params = {};
-                    Str8 ConverterPath = {};
+                    Str8 ConverterName = {};
 
                 #if defined(NC_OS_WIN)
-                    ConverterPath = SystemGetFullFilePath(
-                        Scratch.MemPool,
-                        "fli.exe"_s8
-                    );
+                    ConverterName = "fli.exe"_s8;
                 #else
-                    ConverterPath = SystemGetFullFilePath(
-                        Scratch.MemPool,
-                        "fli"_s8
-                    );
+                    ConverterName = "fli"_s8;
                 #endif
 
-                    Params.Path = GetProcessProperties()->InitialPath;
+                    // NOTE(nc): the converter sits next to this binary, so
+                    //         : it is found from the binary path and not
+                    //         : from the path the app was started in.
+                    Params.Path = GetProcessProperties()->BinaryPath;
                     Params.InheritEnvironment = TRUE;
                     Params.HideConsole = TRUE;
                     ListPush(
                         Scratch.MemPool, 
                         &Params.CommandLineArgs, 
-                        ConverterPath
+                        ConverterName
                     );
                     ListPush(
                         Scratch.MemPool, 
@@ -1011,6 +1008,15 @@ FLIAsyncTick(void)
                         PRINT_STR(OriginalPath)
                     );
                     T->Process = ProcessLaunch(&Params);
+
+                    if (T->Process == EMPTY_HANDLE_VALUE) {
+                        LogError(
+                            "could not launch the converter '%S/%S'",
+                            PRINT_STR(Params.Path),
+                            PRINT_STR(ConverterName)
+                        );
+                    }
+
                     T->LoadStatus = FLI_LOAD_STATUS_ACTIVE;
                     ++FLI_SHARED->ConversionProcessCount;
                     FLI_SHARED->ConversionThreadCount += T->ThreadCount;
@@ -1050,8 +1056,14 @@ FLIAsyncTick(void)
                         }
                     }
 
-                    if (!TaskIsDone)
-                        TaskIsDone = ProcessJoin(T->Process, 0);
+                    // NOTE(nc): a converter that did not launch has no
+                    //         : process to join, so the task is done.
+                    if (!TaskIsDone) {
+                        TaskIsDone = (
+                            T->Process == EMPTY_HANDLE_VALUE ||
+                            ProcessJoin(T->Process, 0)
+                        );
+                    }
 
                     if (TaskIsDone) {
                         T->LoadStatus = FLI_LOAD_STATUS_COMPLETE;

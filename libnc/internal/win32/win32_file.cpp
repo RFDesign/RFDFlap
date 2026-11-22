@@ -315,22 +315,21 @@ SystemDeleteFile(Str8 FilePath)
 Str8 
 SystemGetFullFilePath(Arena* MemPool, Str8 FilePath)
 {
-    TempArena Scratch = ArenaBeginTemp(MemPool);
+    TempArena Scratch = GetScratch(&MemPool, 1);
     Str16 WideFilePath = Str16FromStr8(Scratch.MemPool, FilePath);
     DWORD BufferSize = MAX(MAX_PATH, FilePath.Size * 2) + 1;
     WCHAR* Buffer = ArenaPushArray(Scratch.MemPool, WCHAR, BufferSize);
     DWORD FilePathSize = GetFullPathNameW((WCHAR*) WideFilePath.Str, BufferSize, Buffer, NULL);
 
     if (FilePathSize > BufferSize) {
-        ArenaPop(Scratch.MemPool, BufferSize);
         BufferSize = FilePathSize + 1;
         Buffer = ArenaPushArray(Scratch.MemPool, WCHAR, BufferSize);
         FilePathSize = GetFullPathNameW((WCHAR*) WideFilePath.Str, BufferSize, Buffer, NULL);
     }
 
-    Str8 Result = Str((u8*) Buffer, BufferSize);
-    Result = ArenaPushStrCpy(MemPool, Result);
-    ArenaEndTemp(Scratch);
+    Str8 Result = Str8FromStr16(MemPool, Str((u16*) Buffer, FilePathSize));
+
+    ReleaseScratch(Scratch);
 
     return Result;
 }

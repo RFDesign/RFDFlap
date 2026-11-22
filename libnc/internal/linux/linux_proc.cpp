@@ -137,17 +137,12 @@ ProcessJoin(Handle ProcHandle, u64 EndTimeUSecs)
     b32 Result = FALSE;
 
     if (!EndTimeUSecs) {
-        if (kill(PID, 0) >= 0) {
-            Result = (errno == ENOENT);
+        int Stat = 0;
+        pid_t W = waitpid(PID, &Stat, WNOHANG);
 
-            if (Result) {
-                int Stat;
-
-                waitpid(PID, &Stat, 0);
-            }
-        } else {
-            ASSERT(FALSE && "Failed to get status from PID");
-        }
+        // NOTE(nc): -1 is a PID that is not a child any more, so there
+        //         : is nothing left to wait for.
+        Result = (W == PID || W == -1);
     } else if (EndTimeUSecs == U64_MAX) {
         for (;;) {
             int Stat = 0;

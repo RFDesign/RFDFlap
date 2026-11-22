@@ -9,6 +9,7 @@
 #include "fli.h"
 
 #include "flv_lower.h"
+#include "flv_stdlib.h"
 #include "flv_visualisation.h"
 
 #include "flap_graph.h"
@@ -17,6 +18,8 @@
 #define FLAP_GRAPH_SPAN_MAX_USECS (1ULL << 40)
 #define FLAP_GRAPH_MINIMAP_WIDTH  512
 #define FLAP_GRAPH_MINIMAP_HEIGHT 32
+#define FLAP_GRAPH_MINIMAP_LANE   3
+#define FLAP_GRAPH_MODE_COLOURS   8
 
 typedef u32 FLAPGraphCaptureKind;
 enum : u32 {
@@ -30,6 +33,9 @@ enum : u32 {
     FLAP_GRAPH_SETTING_KIND_LOCK_Y,
     FLAP_GRAPH_SETTING_KIND_SHOW_MINIMAP,
     FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS_ON_GRAPH,
+    FLAP_GRAPH_SETTING_KIND_SHOW_MODES_ON_GRAPH,
+    FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS_ON_MINIMAP,
+    FLAP_GRAPH_SETTING_KIND_SHOW_MODES_ON_MINIMAP,
     FLAP_GRAPH_SETTING_KIND_COUNT
 };
 
@@ -117,14 +123,17 @@ struct FLAPGraphMinimapDrag {
     u32                      __Padding;
 };
 
-// NOTE(nc): the head of the key of a minimap texture. the colours of the
-//         : curves follow it, and then the source of the view.
+// NOTE(nc): the head of the key of a minimap texture. the colours follow
+//         : it: the curves, then the flags, then the modes. a count of
+//         : zero is a layer that is off. the source of the view is last.
 struct FLAPGraphMinimapKey {
     u64    UnitHash;
     FLIKey Flight;
     r1u64  TimeRangeUSecs;
     u32    AnalysisIndex;
     u32    ColoursCount;
+    u32    FlagColoursCount;
+    u32    ModeColoursCount;
 };
 
 struct FLAPGraphMinimapDrawData {
@@ -132,6 +141,7 @@ struct FLAPGraphMinimapDrawData {
     r1u64      FitRangeUSecs;
     r1u64      TimeRangeUSecs;
     v4f32      DimColour;
+    v4f32      BorderColour;
     u32        PlotX;
     u32        Width;
     b32        HasTexture;
@@ -197,6 +207,10 @@ struct FLAPGraphDrawData {
     FLAPGraphDrawCurve*   Curves;
     FLAPGraphDrawLabel*   Labels;
     FLVRenderFlag const** Flags;
+    v4f32*                FlagColours;
+    FLIMode const*        Modes;
+    FLVModeName const*    ModeNames;
+    v4f32*                ModeColours;
     r1u64                 TimeRangeUSecs;
     r1u64                 View;
     u64                   StepUSecs;
@@ -204,7 +218,6 @@ struct FLAPGraphDrawData {
     r1f32                 ValueRanges[2];
     b32                   HasRange[2];
     v4f32                 LabelColour;
-    v4f32                 BandColour;
     v4f32                 CursorColour;
     FLAPGraphMetrics      Metrics;
     u32                   CurvesCount;
@@ -215,6 +228,8 @@ struct FLAPGraphDrawData {
     u32                   PlotY;
     u32                   Width;
     u32                   Height;
+    u32                   ModesCount;
+    u32                   ModeNamesCount;
 };
 
 // @runtime____________________________________________________________________

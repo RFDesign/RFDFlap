@@ -7,7 +7,13 @@ RESET='\033[0;0m'
 
 BuildMode="debug"
 FLIDefine=""
-GuiDefine="-DNC_GUI=1 -DNC_USE_OPENGL -DNC_USE_OPENGL_GLX -DNC_USE_FREETYPE -DNC_SLOW_FLOATS"
+CLIDefine=""
+GuiDefine=""
+# NOTE: libnc.h always pulls in a render + font backend (and #errors without
+#     : one), so these go on every build, same as /DNC_USE_DX11 /DNC_USE_DWRITE
+#     : in build.bat. only NC_GUI changes between gui/cli/fli.
+BackendDefine="-DNC_USE_OPENGL -DNC_USE_OPENGL_GLX -DNC_USE_FREETYPE"
+DataDirDefine='-DNC_DATA_DIR="flap"'
 
 for arg in "$@"; do
     case "$(echo $arg | tr '[:upper:]' '[:lower:]')" in
@@ -19,6 +25,9 @@ for arg in "$@"; do
             ;;
         fli)
             FLIDefine="-DNC_FLI=1"
+            ;;
+        cli)
+            CLIDefine="-DNC_CLI=1"
             ;;
     esac
 done
@@ -36,8 +45,11 @@ SourceFiles="../flap.cpp"
 
 if [ -n "$FLIDefine" ]; then
     OutputBin="fli"
+elif [ -n "$CLIDefine" ]; then
+    OutputBin="flap_cli"
 else
     OutputBin="flap"
+    GuiDefine="-DNC_GUI=1"
 fi
 
 SharedCompilerFlags=(
@@ -165,7 +177,7 @@ nasm "$ASMFlags" "$INTRINASMSourceFiles" -o "$INTRINASMOutputObj"
 
 echo -e "${YELLOW}____compiling_and_linking____${RESET}"
 g++ ${SharedCompilerFlags[@]} ${WarningFlags[@]} $ConfigCompilerFlags \
-    $GuiDefine $MrfDefine $SourceFiles $MATHASMOutputObj $INTRINASMOutputObj \
+    $BackendDefine $GuiDefine $FLIDefine $CLIDefine $DataDirDefine $SourceFiles $MATHASMOutputObj $INTRINASMOutputObj \
     -o $OutputBin \
     ${SharedLinkerFlags[@]} ${GUILinkerFlags[@]}
 
