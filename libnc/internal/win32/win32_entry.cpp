@@ -445,7 +445,7 @@ EntryPointCaller(int ArgC, WCHAR** WArgV)
     MainThreadBaseEntryPoint(ArgC, ArgV);
 }
 
-#if defined(NC_FLI)
+#if defined(NC_FLI) || defined(NC_CLI)
     EXTERN_C_LINK INT
     wmain(INT ArgC, WCHAR** WArgV)
     {

@@ -2560,7 +2560,7 @@ AppViewUI(r2f32 Rect)
                                                                                             );
                                                                                             b32 IsActivatedOnSingleClick = !!(CellInfo.Flags & APP_WATCH_CELL_FLAG_ACTIVATE_WITH_SINGLE_CLICK);
                                                                                             b32 IsNonCode = TRUE;
-                                                                                            Str8 GhostText = {};
+                                                                                            Str8 GhostText = ""_s8;
 
                                                                                             if (
                                                                                                 CellSelected && EWV->IsTextEditing &&
@@ -3473,7 +3473,10 @@ EntryPoint(CommandLine* CLI)
 {
 #if defined(NC_FLI)
     FLIEntryPoint(CLI);
+#elif defined(NC_CLI)
+    PrintOut("Hello, World!\n");
 #else
+    // SockInit();
     // HTTPInit();
     MDInit();
     ConfigInit();

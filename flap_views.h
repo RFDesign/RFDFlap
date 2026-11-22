@@ -41,6 +41,7 @@ struct FLAPViewTabState {
     b32               HasHotTable;
     FLAPExportKind    TableExportKind;
     b32               IsTableExportWaiting;
+    FLAPGraphHold     GraphHolds[FLV_LAYOUT_MAX];
     b32               IsFitRequested;
     u32               __Padding;
 };
@@ -51,8 +52,9 @@ struct FLAPViewTabCtx {
     FLVUnit const*    Unit;
     FLIKey const*     Keys;
     u64               KeysCount;
+    Str8              MinimapSource;
     u32               Flight;
-    u32               __Padding;
+    u32               GraphSettings;
     FLIParsed*        FLI;
     FLAPViewTabState* State;
 };

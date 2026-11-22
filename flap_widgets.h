@@ -15,12 +15,29 @@
 
 // @defines____________________________________________________________________
 #define FLAP_GRAPH_SPAN_MAX_USECS (1ULL << 40)
+#define FLAP_GRAPH_MINIMAP_WIDTH  512
+#define FLAP_GRAPH_MINIMAP_HEIGHT 32
 
 typedef u32 FLAPGraphCaptureKind;
 enum : u32 {
     FLAP_GRAPH_CAPTURE_KIND_NULL,
     FLAP_GRAPH_CAPTURE_KIND_FILE,
     FLAP_GRAPH_CAPTURE_KIND_CLIPBOARD
+};
+
+typedef u32 FLAPGraphSettingKind;
+enum : u32 {
+    FLAP_GRAPH_SETTING_KIND_LOCK_Y,
+    FLAP_GRAPH_SETTING_KIND_SHOW_MINIMAP,
+    FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS_ON_GRAPH,
+    FLAP_GRAPH_SETTING_KIND_COUNT
+};
+
+typedef u32 FLAPGraphMinimapDragKind;
+enum : u32 {
+    FLAP_GRAPH_MINIMAP_DRAG_KIND_MOVE,
+    FLAP_GRAPH_MINIMAP_DRAG_KIND_RESIZE_MIN,
+    FLAP_GRAPH_MINIMAP_DRAG_KIND_RESIZE_MAX
 };
 
 // @types______________________________________________________________________
@@ -72,7 +89,53 @@ struct FLAPGraphMetrics {
     f32 MarkerSpacing;
     f32 LineWidth;
     f32 SnapRadius;
-    u32 __Padding;
+    f32 Minimap;
+};
+
+struct FLAPGraphSettingInfo {
+    Str8 Name;
+    Str8 DisplayName;
+};
+
+struct FLAPGraphHold {
+    u64    UnitHash;
+    FLIKey Flight;
+    r1f32  ValueRanges[2];
+    b32    HasRange[2];
+    b32    IsHeld;
+    u32    FitGeneration;
+};
+
+struct FLAPGraphDrag {
+    r1u64 TimeRangeUSecs;
+    r1f32 ValueRanges[2];
+};
+
+struct FLAPGraphMinimapDrag {
+    r1u64                    TimeRangeUSecs;
+    FLAPGraphMinimapDragKind Kind;
+    u32                      __Padding;
+};
+
+// NOTE(nc): the head of the key of a minimap texture. the colours of the
+//         : curves follow it, and then the source of the view.
+struct FLAPGraphMinimapKey {
+    u64    UnitHash;
+    FLIKey Flight;
+    r1u64  TimeRangeUSecs;
+    u32    AnalysisIndex;
+    u32    ColoursCount;
+};
+
+struct FLAPGraphMinimapDrawData {
+    RendHandle Texture;
+    r1u64      FitRangeUSecs;
+    r1u64      TimeRangeUSecs;
+    v4f32      DimColour;
+    u32        PlotX;
+    u32        Width;
+    b32        HasTexture;
+    u32        __Padding;
 };
 
 // TODO(nc): can squash the bools into an bitmask
@@ -90,6 +153,8 @@ struct FLAPGraphState {
     b32                  HasHotKey;
     FLAPGraphCaptureKind CaptureKind;
     b32                  IsCaptureRequested;
+    b32                  IsMenuOpened;
+    u32                  FitGeneration;
 };
 
 struct FLAPGraphParams {
@@ -100,10 +165,14 @@ struct FLAPGraphParams {
     FLVRenderItem*    Items;
     FLAPGraphState*   State;
     FLAPGraphColumns* Columns;
+    FLAPGraphHold*    Hold;
+    Str8              MinimapSource;
     u64               UnitHash;
     FLIKey            Flight;
     FLAPGraphMetrics  Metrics;
     u32               Key;
+    u32               Settings;
+    u32               AnalysisIndex;
     u32               __Padding;
 };
 
@@ -161,5 +230,6 @@ b32 FLAPTableCtxFromParams(Arena* MemPool, FLAPTableParams* Params, OUT FLAPTabl
 
 INTERNAL UI_BOX_CUSTOM_DRAW(FLAPFlaggedRowDraw);
 INTERNAL UI_BOX_CUSTOM_DRAW(FLAPGraphDraw);
+INTERNAL UI_BOX_CUSTOM_DRAW(FLAPGraphMinimapDraw);
 
 #endif // __FLAP_WIDGETS_H__

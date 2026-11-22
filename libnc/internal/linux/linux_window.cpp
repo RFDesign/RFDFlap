@@ -3255,7 +3255,31 @@ GetEvents(Arena* MemPool, b32 Wait)
                     else
                         GRAPHICS_STATE->KeyDownState[Input / 64] &= ~(1ULL << (Input % 64));
 
-                    if (Event.type == KeyPress && TextSize) {
+                    // NOTE(nc): the press goes before its text, as on Windows
+                    //         : (WM_KEYDOWN, then WM_CHAR). the hotkey code
+                    //         : takes the press, then eats the text after it.
+                    {
+                        InputEvent* Evt = ListPush(
+                            MemPool,
+                            &Result,
+                            (Event.type == KeyPress) 
+                                ? EVENT_KIND_PRESS 
+                                : EVENT_KIND_RELEASE
+                        );
+
+                        Evt->WindowHandle.V[0] = INT_FROM_PTR(Win);
+                        Evt->Modifier = Modifiers;
+                        Evt->Input = Input;
+                        Evt->RightSided = IsRightSided;
+                    }
+
+                    // NOTE(nc): no text with Alt held, as on Windows, where
+                    //         : Alt and a key is WM_SYSCHAR.
+                    if (
+                        Event.type == KeyPress && 
+                        TextSize &&
+                        !(Modifiers & INPUT_MOD_KIND_ALT)
+                    ) {
                         for (u64 Offset = 0; Offset < TextSize; ) {
                             UnicodeDecode Decode = UTF8Decode(
                                 Text + Offset, 
@@ -3282,21 +3306,6 @@ GetEvents(Arena* MemPool, b32 Wait)
 
                             Offset += Decode.Inc;
                         }
-                    }
-
-                    {
-                        InputEvent* Evt = ListPush(
-                            MemPool,
-                            &Result,
-                            (Event.type == KeyPress) 
-                                ? EVENT_KIND_PRESS 
-                                : EVENT_KIND_RELEASE
-                        );
-
-                        Evt->WindowHandle.V[0] = INT_FROM_PTR(Win);
-                        Evt->Modifier = Modifiers;
-                        Evt->Input = Input;
-                        Evt->RightSided = IsRightSided;
                     }
                 } break;
 
@@ -3443,10 +3452,13 @@ GetEvents(Arena* MemPool, b32 Wait)
                             else
                                 GRAPHICS_STATE->KeyDownState[Input / 64] &= ~(1ull << (Input % 64));
                         } else if (
-                            Event.xbutton.button == Button4 ||
-                            Event.xbutton.button == Button5 ||
-                            Event.xbutton.button == 6 ||
-                            Event.xbutton.button == 7
+                            Event.type == ButtonPress &&
+                            (
+                                Event.xbutton.button == Button4 ||
+                                Event.xbutton.button == Button5 ||
+                                Event.xbutton.button == 6 ||
+                                Event.xbutton.button == 7
+                            )
                         ) {
                             InputEvent* Evt = ListPush(
                                 MemPool, 
@@ -3456,6 +3468,13 @@ GetEvents(Arena* MemPool, b32 Wait)
 
                             Evt->WindowHandle.V[0] = INT_FROM_PTR(Win);
                             Evt->Modifier = Modifiers;
+                            Evt->Input = (Event.xbutton.button == Button4)
+                                ? INPUT_KIND_SCROLL_UP
+                                : (Event.xbutton.button == Button5)
+                                    ? INPUT_KIND_SCROLL_DOWN
+                                    : (Event.xbutton.button == 6)
+                                        ? INPUT_KIND_SCROLL_LEFT
+                                        : INPUT_KIND_SCROLL_RIGHT;
                             Evt->PositionDelta = Vec(
                                 (Event.xbutton.button == 6) 
                                     ? -120.0f 

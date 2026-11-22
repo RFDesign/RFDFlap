@@ -8,7 +8,7 @@ IOHandles IO_HANDLES = {};
 void
 PrintInit(void)
 {
-#if !defined(NC_FLI)
+#if !defined(NC_FLI) && !defined(NC_CLI)
     if (!AllocConsole()) {
         return;
     }
@@ -47,7 +47,7 @@ PrintInit(void)
 void
 PrintRelease(void)
 {
-#if !defined(NC_FLI)
+#if !defined(NC_FLI) && !defined(NC_CLI)
     FreeConsole();
 #endif
 }

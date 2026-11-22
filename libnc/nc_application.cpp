@@ -1979,7 +1979,7 @@ AppNameSchemaInfo APP_NAME_SCHEMA_INFO_TABLE[12] = {
     {
         Str8Lit("flv_view"),
         FALSE,
-        Str8Lit("@inherit(tab) x:\n{\n  @display_name('View File') @description(\"The FLV file that the tab shows.\")\n  'file': @no_relativise path,\n}\n")
+        Str8Lit("@inherit(tab) x:\n{\n  @display_name('View File') @description(\"The FLV file that the tab shows.\")\n  'file': @no_relativise path,\n  @default(0) @display_name('Auto Fit Y') @description(\"Fits the value axis of a graph to the data in view as the view moves. When off, the value axis is held from the last fit.\")\n  @default(0) @display_name('Lock Y Axis') @description(\"Keeps the value axis of a graph where it is. A drag moves the view in time only.\")\n  'lock_y': bool,\n  @default(0) @display_name('Show Minimap') @description(\"Shows a small picture of the whole flight under each graph, with a box for the view.\")\n  'show_minimap': bool,\n  @default(0) @display_name('Show Flags On Graph') @description(\"Draws the flags of an analysis on its graph.\")\n  'show_flags_on_graph': bool,\n}\n")
     }
 };
 
@@ -8913,8 +8913,14 @@ AppFrame(void)
             Event; 
             Event = Next
         ) {
+            Next = Event->Next;
+
             if (
-                Event->Kind == EVENT_KIND_PRESS &&
+                (
+                    Event->Kind == EVENT_KIND_PRESS ||
+                    Event->Kind == EVENT_KIND_SCROLL
+                ) &&
+                Event->Input != INPUT_KIND_NULL &&
                 Event->Input != INPUT_KIND_ESC &&
                 Event->Input != INPUT_KIND_RETURN &&
                 Event->Input != INPUT_KIND_BACKSPACE &&
@@ -9143,6 +9149,34 @@ AppFrame(void)
                 }
 
                 AppRequestFrame();
+            }
+
+            // NOTE(nc): Hotkey scrolls. a wheel direction with no binding
+            //         : falls through to the UI as a normal scroll.
+            if (
+                !Take && 
+                Event->Kind == EVENT_KIND_SCROLL && 
+                Event->Input != INPUT_KIND_NULL
+            ) {
+                ConfigBinding Binding = {};
+
+                Binding.Input = Event->Input;
+                Binding.ModKind = Event->Modifier;
+
+                ConfigInputMapNodePtrList KeyMapNodes = ConfigInputMapNodePtrListFromBinding(
+                    Scratch.MemPool, 
+                    APP_STATE->KeyMap, 
+                    Binding
+                );
+
+                if (KeyMapNodes.Head) {
+                    AppCmd(
+                        APP_COMMAND_KIND_RUN_COMMAND, 
+                        __Registers.CommandName = KeyMapNodes.Head->V->Name
+                    );
+                    AppRequestFrame();
+                    Take = TRUE;
+                }
             }
 
             // NOTE(nathan): Text events
@@ -10533,7 +10567,7 @@ AppFrame(void)
                                 ConfigNode* Root0 = ConfigNodeNew(
                                     APP_STATE->Config, 
                                     Panels, 
-                                    "100.0"_s8
+                                    "1.0"_s8
                                 );
                                 ConfigNode* MainPanel = Root0;
 
@@ -17081,9 +17115,19 @@ AppWindowFrame(void)
                                 ? (UI_PERMISSION_KIND_KEYBRD_SECONDARY | UI_PERMISSION_KIND_CLICKS | UI_PERMISSION_KIND_SCROLL_X | UI_PERMISSION_KIND_SCROLL_Y)
                                 : UI_PERMISSION_KIND_ALL
                         ) {
+                            b32 IsSmall = (
+                                ConfigNodeChildFromStr(
+                                    View, 
+                                    "small"_s8
+                                ) != EMPTY_CFG_NODE_VALUE
+                            );
                             b32 HasFooter = (IsLister && !IsAnchored);
+                            // NOTE(nc): a small lister is a menu. it has the
+                            //         : corners of the palette, with a
+                            //         : footer or with none.
+                            b32 IsRound = (HasFooter || (IsLister && IsSmall));
                             UIBox* Container = EMPTY_UI_BOX_VALUE;
-                            f32 ContainerCornerRadiusPX = HasFooter
+                            f32 ContainerCornerRadiusPX = IsRound
                                 ? UIHeadFontSize()
                                 : UIHeadFontSize() * 0.15f;
 

@@ -1,6 +1,6 @@
 #include "nc_keyboard.h"
 
-const Str8 INPUT_DISPLAY_STR_TABLE[143] = {
+const Str8 INPUT_DISPLAY_STR_TABLE[INPUT_KIND_COUNT] = {
     Str8Lit("Invalid Key"),
     Str8Lit("Escape"),
     Str8Lit("F1"),
@@ -143,5 +143,9 @@ const Str8 INPUT_DISPLAY_STR_TABLE[143] = {
     Str8Lit("Numpad 9"),
     Str8Lit("Left Mouse Button"),
     Str8Lit("Middle Mouse Button"),
-    Str8Lit("Right Mouse Button")
+    Str8Lit("Right Mouse Button"),
+    Str8Lit("Scroll Up"),
+    Str8Lit("Scroll Down"),
+    Str8Lit("Scroll Left"),
+    Str8Lit("Scroll Right")
 };

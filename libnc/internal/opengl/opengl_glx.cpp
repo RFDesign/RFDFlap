@@ -3,6 +3,7 @@
 #include "../../nc_string.h"
 
 #include "opengl_glx_platform.h"
+#include "opengl_glx.h"
 
 GLXContext OGLContext = NULL;
 
@@ -169,4 +170,3 @@ OGLSwapWindow(Handle WindowHandle, RendHandle Renderer)
 
     glXSwapBuffers(GRAPHICS_STATE->Disp, Window->Win);
 }
-

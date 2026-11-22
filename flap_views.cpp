@@ -405,10 +405,14 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                 NodeIndex,
                 Program->EmitCount
             );
+            Params.Hold = &State->GraphHolds[NodeIndex];
+            Params.MinimapSource = Ctx->MinimapSource;
+            Params.AnalysisIndex = Node->AnalysisIndex;
             Params.MemPool = AppViewMemPool();
             Params.UnitHash = Ctx->Unit->Hash;
             Params.Flight = Ctx->Keys[Ctx->Flight];
             Params.Key = NodeIndex;
+            Params.Settings = Ctx->GraphSettings;
             Params.Metrics = FLAPGraphMetricsFromFontSize(
                 UIHeadFontSize()
             );
@@ -788,6 +792,26 @@ FLAPGraphCaptureExport(
     }
 }
 
+// NOTE(nc): one bit for each setting of the table. the view reads it one
+//         : time in a frame, for all its graphs.
+INTERNAL u32
+FLAPGraphSettingsFromView(void)
+{
+    u32 Result = 0;
+
+    for (u32 Kind = 0; Kind < FLAP_GRAPH_SETTING_KIND_COUNT; ++Kind) {
+        if (
+            AppViewSettingFromNameb32(
+                FLAP_GRAPH_SETTING_INFO_TABLE[Kind].Name
+            )
+        ) {
+            Result |= (1 << Kind);
+        }
+    }
+
+    return Result;
+}
+
 APP_VIEW_UI_FUNC_DEF(FLVView)
 {
     UNUSED(Eval);
@@ -906,6 +930,46 @@ APP_VIEW_UI_FUNC_DEF(FLVView)
             Ctx.FLI = FLI;
             Ctx.State = State;
             Ctx.View = View;
+            Ctx.GraphSettings = FLAPGraphSettingsFromView();
+
+            // NOTE(nc): what a minimap texture is made from, apart from
+            //         : its graph: the flights, the path of the view and
+            //         : the search paths. one time in a frame, for all the
+            //         : graphs, and only when the minimap is on.
+            if (
+                Ctx.GraphSettings & (
+                    1 << FLAP_GRAPH_SETTING_KIND_SHOW_MINIMAP
+                )
+            ) {
+                Str8List Parts = {};
+                u64 KeysCount = Flights.Keys.Count;
+                u64 SearchPathsCount = SearchPathNodes.Count;
+
+                ListPush(Scratch.MemPool, &Parts, Str8Struct(&KeysCount));
+                ListPush(
+                    Scratch.MemPool,
+                    &Parts,
+                    Str((u8*) Flights.Keys.V, sizeof(FLIKey) * KeysCount)
+                );
+                ListPush(Scratch.MemPool, &Parts, Str8Struct(&Path.Size));
+                ListPush(Scratch.MemPool, &Parts, Path);
+                ListPush(
+                    Scratch.MemPool, 
+                    &Parts, 
+                    Str8Struct(&SearchPathsCount)
+                );
+
+                for (u64 Index = 0; Index < SearchPathsCount; ++Index) {
+                    ListPush(
+                        Scratch.MemPool,
+                        &Parts,
+                        Str8Struct(&SearchPaths[Index].Size)
+                    );
+                    ListPush(Scratch.MemPool, &Parts, SearchPaths[Index]);
+                }
+
+                Ctx.MinimapSource = StrListJoin(Scratch.MemPool, &Parts, NULL);
+            }
 
             AppWindowState* WindowState = AppWindowStateFromConfig(
                 AppWindowFromConfig(View)
@@ -950,6 +1014,27 @@ APP_VIEW_UI_FUNC_DEF(FLVView)
 
                     case APP_COMMAND_KIND_EXPORT_TABLE_TXT: {
                         State->TableExportKind = FLAP_EXPORT_KIND_TXT;
+                    } break;
+
+                    // NOTE(nc): the time is in seconds, as the time axis
+                    //         : of the graphs shows it. the view keeps its
+                    //         : span and the time goes to its middle.
+                    case APP_COMMAND_KIND_GOTO_TIME: {
+                        Str8 Input = Cmd->Regs->String;
+                        u64 Span = Length(State->Graph.TimeRangeUSecs);
+                        f64 Seconds = F64FromStr(Input);
+
+                        if (Input.Size && Span && Seconds >= 0.0) {
+                            u64 TimeUSecs = (u64) (Seconds * 1000000.0 + 0.5);
+                            u64 Half = Span / 2;
+                            u64 NewMin = (TimeUSecs > Half)
+                                ? TimeUSecs - Half
+                                : 0;
+
+                            State->Graph.TimeRangeUSecs.Min = NewMin;
+                            State->Graph.TimeRangeUSecs.Max = NewMin + Span;
+                            AppRequestFrame();
+                        }
                     } break;
                 }
             }
@@ -1001,6 +1086,7 @@ APP_VIEW_UI_FUNC_DEF(FLVView)
             ) {
                 State->Graph.TimeRangeUSecs = State->Graph.FitRangeUSecs;
                 State->Graph.IsFitted = TRUE;
+                ++State->Graph.FitGeneration;
                 AppRequestFrame();
             }
 

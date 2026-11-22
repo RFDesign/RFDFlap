@@ -42,7 +42,7 @@ struct GraphicsState {
 
 EXTERN_C_LINK_BEGIN
 
-Str8 KEYBOARD_CONFIG_STR_TABLE[143] = {
+Str8 KEYBOARD_CONFIG_STR_TABLE[INPUT_KIND_COUNT] = {
     Str8Lit("null"),
     Str8Lit("esc"),
     Str8Lit("f1"),
@@ -185,7 +185,11 @@ Str8 KEYBOARD_CONFIG_STR_TABLE[143] = {
     Str8Lit("numpad_9"),
     Str8Lit("left_mouse"),
     Str8Lit("middle_mouse"),
-    Str8Lit("right_mouse")
+    Str8Lit("right_mouse"),
+    Str8Lit("scroll_up"),
+    Str8Lit("scroll_down"),
+    Str8Lit("scroll_left"),
+    Str8Lit("scroll_right")
 };
 
 EXTERN_C_LINK_END
@@ -606,20 +610,23 @@ WinWindowFunc(HWND WindowHandle, UINT Message, WPARAM WParam, LPARAM LParam)
             Event->Position.X = (f32) Point.x;
             Event->Position.Y = (f32) Point.y;
             Event->PositionDelta = Vec(0.0f, -(f32) WheelDelta);
+            Event->Input = (WheelDelta > 0)
+                ? INPUT_KIND_SCROLL_UP
+                : INPUT_KIND_SCROLL_DOWN;
         } break;
 
-        case WM_MOUSEHWHEEL: {
-            i16 WheelDelta = HIWORD(WParam);
-            InputEvent* Event = PushEvent(EVENT_KIND_SCROLL, Window);
-            POINT Point = {};
+        // case WM_MOUSEHWHEEL: {
+        //     i16 WheelDelta = HIWORD(WParam);
+        //     InputEvent* Event = PushEvent(EVENT_KIND_SCROLL, Window);
+        //     POINT Point = {};
 
-            Point.x = (i32)(i16) LOWORD(LParam);
-            Point.y = (i32)(i16) HIWORD(LParam);
-            ScreenToClient(Window->WindowHandle, &Point);
-            Event->Position.X = (f32) Point.x;
-            Event->Position.Y = (f32) Point.y;
-            Event->PositionDelta = Vec((f32) WheelDelta, 0.0f);
-        } break;
+        //     Point.x = (i32)(i16) LOWORD(LParam);
+        //     Point.y = (i32)(i16) HIWORD(LParam);
+        //     ScreenToClient(Window->WindowHandle, &Point);
+        //     Event->Position.X = (f32) Point.x;
+        //     Event->Position.Y = (f32) Point.y;
+        //     Event->PositionDelta = Vec((f32) WheelDelta, 0.0f);
+        // } break;
 
         case WM_SYSKEYDOWN:
         case WM_SYSKEYUP: {

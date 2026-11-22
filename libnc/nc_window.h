@@ -49,7 +49,7 @@ enum InputEventKind {
 };
 
 EXTERN_C_LINK_BEGIN
-extern Str8 KEYBOARD_CONFIG_STR_TABLE[143];
+extern Str8 KEYBOARD_CONFIG_STR_TABLE[INPUT_KIND_COUNT];
 EXTERN_C_LINK_END
 
 // @types______________________________________________________________________

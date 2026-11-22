@@ -3,10 +3,11 @@ setlocal enabledelayedexpansion
 
 set BuildMode=debug
 set FLIDefine=
+set CLIDefine=
 set SubSystem=
 set EntryPoint=
 set GuiDefine=/DNC_USE_DX11 /DNC_USE_DWRITE
-set DataDirDefine=/DNC_DATA_DIR=\"flap_gui\"
+set DataDirDefine=/DNC_DATA_DIR=\"flap\"
 
 for %%a in (%*) do (
     set Arg=%%~a
@@ -14,6 +15,7 @@ for %%a in (%*) do (
     if /I "!Arg!"=="release" set BuildMode=release
     if /I "!Arg!"=="dev"     set BuildMode=dev
     if /I "!Arg!"=="fli"     set FLIDefine=/DNC_FLI
+    if /I "!Arg!"=="cli"     set CLIDefine=/DNC_CLI
 )
 
 if not exist build mkdir build
@@ -59,11 +61,19 @@ if defined FLIDefine (
     set EntryPoint=/ENTRY:wmainCRTStartup
     set SubSystem=/SUBSYSTEM:CONSOLE
 ) else (
-    set OutputExe=flap.exe
-    set OutputPdb=flap.pdb
-    set OutputMap=flap.map
-    set EntryPoint=/ENTRY:wWinMainCRTStartup
-    set SubSystem=/SUBSYSTEM:WINDOWS
+    if defined CLIDefine (
+        set OutputExe=flap_cli.exe
+        set OutputPdb=flap_cli.pdb
+        set OutputMap=flap_cli.map
+        set EntryPoint=/ENTRY:wmainCRTStartup
+        set SubSystem=/SUBSYSTEM:CONSOLE
+    ) else (
+        set OutputExe=flap.exe
+        set OutputPdb=flap.pdb
+        set OutputMap=flap.map
+        set EntryPoint=/ENTRY:wWinMainCRTStartup
+        set SubSystem=/SUBSYSTEM:WINDOWS
+    )
 )
 
 set SharedCompilerFlags=^
@@ -162,7 +172,7 @@ goto :invalid_mode
     )
 
     echo.[33m____compiling_and_linking____[0m
-    cl.exe %SharedCompilerFlags% %ConfigCompilerFlags% %FLIDefine% %DataDirDefine% %GuiDefine% %SourceFiles% %CHKSTKASMOutputObj% %BSWAPASMOutputObj% %MATHASMOutputObj% %INTRINASMOutputObj% /Fm%OutputMap% /link %SharedLinkerFlags% %ConfigLinkerFlags% /OUT:%OutputExe% /PDB:%OutputPdb%
+    cl.exe %SharedCompilerFlags% %ConfigCompilerFlags% %FLIDefine% %CLIDefine% %DataDirDefine% %GuiDefine% %SourceFiles% %CHKSTKASMOutputObj% %BSWAPASMOutputObj% %MATHASMOutputObj% %INTRINASMOutputObj% /Fm%OutputMap% /link %SharedLinkerFlags% %ConfigLinkerFlags% /OUT:%OutputExe% /PDB:%OutputPdb%
 
     set LastError=%ERRORLEVEL%
     if not %LastError% == 0 (

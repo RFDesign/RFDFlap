@@ -7,10 +7,26 @@
 #include "nc_profile.h"
 
 #include "flv_token.h"
+#include "flv_compile.h"
 #include "flv_run.h"
 
 #include "flap_graph.h"
 #include "flap_widgets.h"
+
+global readonly FLAPGraphSettingInfo FLAP_GRAPH_SETTING_INFO_TABLE[FLAP_GRAPH_SETTING_KIND_COUNT] = {
+    {
+        Str8Lit("lock_y"),
+        Str8Lit("Lock Y Axis")
+    },
+    {
+        Str8Lit("show_minimap"),
+        Str8Lit("Show Minimap")
+    },
+    {
+        Str8Lit("show_flags_on_graph"),
+        Str8Lit("Show Flags On Graph")
+    }
+};
 
 internal Str8
 FLAPStrFromTimeOffset(Arena* MemPool, u64 USecs)
@@ -553,6 +569,7 @@ FLAPGraphMetricsFromFontSize(f32 FontSize)
     Result.MarkerSpacing = 8.0f;
     Result.LineWidth = 1.5f;
     Result.SnapRadius = 6.0f;
+    Result.Minimap = 3.0f * FontSize;
 
     return Result;
 }
@@ -1257,6 +1274,416 @@ UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
     ReleaseScratch(Scratch);
 }
 
+// TODO(nc): check if this is the same on linux
+// NOTE(nc): Windows sends 120 for one notch, on all machines. the UI
+//         : divides it by 30, so one notch is 4 here. each of the 4 is the
+//         : 4th root of 0.8 or of 1.25, so one notch is a zoom of 0.8 or of
+//         : 1.25. a wheel with a finer step gets a finer zoom.
+INTERNAL f64
+FLAPGraphZoomFactor(i32 Notches)
+{
+    f64 Result = 1.0;
+
+    for (
+        i32 Notch = Notches;
+        Notch;
+        Notch += (Notch < 0)
+            ? 1
+            : -1
+    ) {
+        Result *= (Notch < 0)
+            ? 0.9457416090960342
+            : 1.0573712634405641;
+    }
+
+    return Result;
+}
+
+INTERNAL u32
+FLAPGraphMinimapPixel(v4f32 Colour)
+{
+    u32 Red = (u32) (CLAMP(0.0f, Colour.X, 1.0f) * 255.0f + 0.5f);
+    u32 Green = (u32) (CLAMP(0.0f, Colour.Y, 1.0f) * 255.0f + 0.5f);
+    u32 Blue = (u32) (CLAMP(0.0f, Colour.Z, 1.0f) * 255.0f + 0.5f);
+    u32 Result = Red | (Green << 8) | (Blue << 16) | 0xFF000000;
+
+    return Result;
+}
+
+INTERNAL void
+FLAPGraphMinimapSpan(u32* Pixels, i32 X, i32 FromY, i32 ToY, u32 Pixel)
+{
+    i32 Top = CLAMP(0, MIN(FromY, ToY), FLAP_GRAPH_MINIMAP_HEIGHT - 1);
+    i32 Bottom = CLAMP(0, MAX(FromY, ToY), FLAP_GRAPH_MINIMAP_HEIGHT - 1);
+
+    for (i32 Y = Top; Y <= Bottom; ++Y)
+        Pixels[Y * FLAP_GRAPH_MINIMAP_WIDTH + X] = Pixel;
+}
+
+// NOTE(nc): the texture of a minimap is an object of the cache. the key
+//         : has all that the picture comes from, so the cache can make it
+//         : again after it evicts it. this runs on an async lane.
+OCObject
+FLAPGraphMinimapObjectCreate(
+    Str8 Key,
+    b32* CancelSignal,
+    OUT b32* Retry,
+    OUT u64* Generation
+) {
+    UNUSED(CancelSignal);
+    UNUSED(Generation);
+
+    OCObject Result = {};
+    TempArena Scratch = GetScratch(NULL, 0);
+    Access* Acc = AccessOpen();
+    FLAPGraphMinimapKey Head = {};
+    u64 Offset = 0;
+    u64 KeysCount = 0;
+    u64 SearchPathsCount = 0;
+    Str8 Path = {};
+
+    MemCpy(&Head, Key.Str + Offset, sizeof(Head));
+    Offset += sizeof(Head);
+
+    u32* Colours = ArenaPushArray(Scratch.MemPool, u32, Head.ColoursCount);
+
+    MemCpy(Colours, Key.Str + Offset, sizeof(u32) * Head.ColoursCount);
+    Offset += sizeof(u32) * Head.ColoursCount;
+    MemCpy(&KeysCount, Key.Str + Offset, sizeof(KeysCount));
+    Offset += sizeof(KeysCount);
+
+    FLIKey* Keys = ArenaPushArray(Scratch.MemPool, FLIKey, KeysCount);
+
+    MemCpy(Keys, Key.Str + Offset, sizeof(FLIKey) * KeysCount);
+    Offset += sizeof(FLIKey) * KeysCount;
+    MemCpy(&Path.Size, Key.Str + Offset, sizeof(Path.Size));
+    Offset += sizeof(Path.Size);
+    Path.Str = Key.Str + Offset;
+    Offset += Path.Size;
+    MemCpy(&SearchPathsCount, Key.Str + Offset, sizeof(SearchPathsCount));
+    Offset += sizeof(SearchPathsCount);
+
+    Str8* SearchPaths = ArenaPushArray(Scratch.MemPool, Str8, SearchPathsCount);
+
+    for (u64 Index = 0; Index < SearchPathsCount; ++Index) {
+        MemCpy(&SearchPaths[Index].Size, Key.Str + Offset, sizeof(u64));
+        Offset += sizeof(u64);
+        SearchPaths[Index].Str = Key.Str + Offset;
+        Offset += SearchPaths[Index].Size;
+    }
+
+    FLVUnit* Unit = FLVUnitFromPath(
+        Acc,
+        Path,
+        Keys,
+        KeysCount,
+        SearchPaths,
+        SearchPathsCount,
+        0
+    );
+    FLIParsed* FLI = FLIParsedFromKey(Acc, Head.Flight, FALSE, 0);
+    FLVRenderItem* Items = NULL;
+    b32 IsReady = (Unit && FLI != EMPTY_FLI_PARSED_VALUE);
+    // NOTE(nc): a unit that is not the unit of the key gives no picture.
+    //         : the view asks again with the key of the new unit.
+    b32 IsUsable = (IsReady && !Unit->HasError && Unit->Hash == Head.UnitHash);
+
+    if (IsUsable) {
+        Items = FLVResultFromUnit(
+            Acc,
+            Unit,
+            Keys,
+            KeysCount,
+            Head.Flight,
+            Head.AnalysisIndex,
+            0
+        );
+        IsReady = (Items != NULL);
+    }
+
+    if (IsUsable && IsReady) {
+        FLVProgram const* Program = &Unit->Lowered.Program[Head.AnalysisIndex];
+        r1u64 Fit = Head.TimeRangeUSecs;
+        u64 Step = FLAPGraphStepFromSpan(Length(Fit), FLAP_GRAPH_MINIMAP_WIDTH);
+        r1u64 View = FLAPGraphViewFromTimeRange(Fit, Step);
+        FLAPGraphColumns* Columns = ArenaPushArrayZero(
+            Scratch.MemPool,
+            FLAPGraphColumns,
+            Program->EmitCount
+        );
+        r1f32 Ranges[2] = {};
+        b32 HasRange[2] = {};
+
+        for (u32 Index = 0; Step && IsReady && Index < Program->EmitCount; ++Index) {
+            if (!FLAPGraphEmitIsCurve(Program, Items, Index))
+                continue;
+
+            FLAPGraphKey ColumnsKey = {};
+            u32 Axis = (Items[Index].Curve.Axis == 2);
+
+            ColumnsKey.Curve = &Items[Index].Curve;
+            ColumnsKey.UnitHash = Head.UnitHash;
+            ColumnsKey.Flight = Head.Flight;
+            ColumnsKey.StepUSecs = Step;
+            IsReady &= FLAPGraphColumnsFromKey(
+                Scratch.MemPool,
+                &Columns[Index],
+                &ColumnsKey,
+                View,
+                Acc,
+                FLI
+            );
+
+            for (u64 Column = View.Min; Column < View.Max; ++Column) {
+                u64 Slot = 0;
+
+                if (!FLAPGraphColumnHas(&Columns[Index], Column, &Slot))
+                    continue;
+
+                if (!HasRange[Axis]) {
+                    Ranges[Axis].Min = Columns[Index].Min[Slot];
+                    Ranges[Axis].Max = Columns[Index].Max[Slot];
+                    HasRange[Axis] = TRUE;
+                } else {
+                    Ranges[Axis].Min = MIN(Ranges[Axis].Min, Columns[Index].Min[Slot]);
+                    Ranges[Axis].Max = MAX(Ranges[Axis].Max, Columns[Index].Max[Slot]);
+                }
+            }
+        }
+
+        if (Step && IsReady) {
+            u32* Pixels = ArenaPushArrayZero(
+                Scratch.MemPool,
+                u32,
+                FLAP_GRAPH_MINIMAP_WIDTH * FLAP_GRAPH_MINIMAP_HEIGHT
+            );
+            f64 TexelsPerUSec = (
+                (f64) FLAP_GRAPH_MINIMAP_WIDTH / (f64) Length(Fit)
+            );
+            u32 CurveIndex = 0;
+
+            for (u32 Index = 0; Index < Program->EmitCount; ++Index) {
+                if (!FLAPGraphEmitIsCurve(Program, Items, Index))
+                    continue;
+
+                FLAPGraphColumns* Curve = &Columns[Index];
+                r1f32 Range = Ranges[Items[Index].Curve.Axis == 2];
+                f32 Scale = (Range.Max > Range.Min)
+                    ? (f32) (FLAP_GRAPH_MINIMAP_HEIGHT - 1) / (Range.Max - Range.Min)
+                    : 0.0f;
+                u32 Pixel = (CurveIndex < Head.ColoursCount)
+                    ? Colours[CurveIndex]
+                    : 0xFFFFFFFF;
+                b32 HasPrev = FALSE;
+                i32 PrevX = 0;
+                i32 PrevY = 0;
+
+                ++CurveIndex;
+
+                for (u64 Column = View.Min; Column < View.Max; ++Column) {
+                    u64 Slot = 0;
+
+                    if (!FLAPGraphColumnHas(Curve, Column, &Slot))
+                        continue;
+
+                    // NOTE(nc): the middle of the column, as a texel
+                    f64 Time = (
+                        (f64) (Column * Step) + 0.5 * (f64) Step - (f64) Fit.Min
+                    );
+                    i32 X = CLAMP(
+                        0,
+                        (i32) (Time * TexelsPerUSec),
+                        FLAP_GRAPH_MINIMAP_WIDTH - 1
+                    );
+                    i32 Top = (i32) ((Range.Max - Curve->Max[Slot]) * Scale + 0.5f);
+                    i32 Bottom = (i32) ((Range.Max - Curve->Min[Slot]) * Scale + 0.5f);
+                    i32 First = (i32) ((Range.Max - Curve->First[Slot]) * Scale + 0.5f);
+                    i32 Last = (i32) ((Range.Max - Curve->Last[Slot]) * Scale + 0.5f);
+                    b32 IsJoined = (
+                        HasPrev &&
+                        (Curve->Join[Slot >> 6] & (1ULL << (Slot & 63))) != 0
+                    );
+
+                    // NOTE(nc): the line from the column before, one span
+                    //         : for each texel that it crosses
+                    if (IsJoined) {
+                        i32 LineY = PrevY;
+
+                        for (i32 Gap = PrevX + 1; Gap <= X; ++Gap) {
+                            i32 Y = PrevY + (
+                                (First - PrevY) * (Gap - PrevX)
+                            ) / (X - PrevX);
+
+                            FLAPGraphMinimapSpan(Pixels, Gap, LineY, Y, Pixel);
+                            LineY = Y;
+                        }
+                    }
+
+                    FLAPGraphMinimapSpan(Pixels, X, Top, Bottom, Pixel);
+                    HasPrev = TRUE;
+                    PrevX = X;
+                    PrevY = Last;
+                }
+            }
+
+            RendHandle Texture = Tex2DAlloc(
+                RESOURCE_KIND_STATIC,
+                Vec(
+                    (i32) FLAP_GRAPH_MINIMAP_WIDTH,
+                    (i32) FLAP_GRAPH_MINIMAP_HEIGHT
+                ),
+                TEX2D_FMT_RGBA8,
+                Pixels
+            );
+
+            Result.V[0] = Texture.U64[0];
+        }
+    }
+
+    // NOTE(nc): V[1] says that the object is done, with a texture or with
+    //         : none, so that the view does not ask for frames for ever.
+    if (!IsReady)
+        *Retry = TRUE;
+    else
+        Result.V[1] = 1;
+
+    AccessClose(Acc);
+    ReleaseScratch(Scratch);
+
+    return Result;
+}
+
+void
+FLAPGraphMinimapObjectDestroy(OCObject Object)
+{
+    RendHandle Texture = {};
+
+    Texture.U64[0] = Object.V[0];
+
+    if (Object.V[0])
+        Tex2DRelease(Texture);
+}
+
+INTERNAL OCObject
+FLAPGraphMinimapObject(
+    FLAPGraphParams* Params,
+    FLAPGraphDrawData* Data,
+    r1u64 Fit
+) {
+    TempArena Scratch = GetScratch(NULL, 0);
+    FLAPGraphMinimapKey Head = {};
+    u32* Colours = ArenaPushArray(Scratch.MemPool, u32, Data->CurvesCount);
+    Str8List Parts = {};
+
+    Head.UnitHash = Params->UnitHash;
+    Head.Flight = Params->Flight;
+    Head.TimeRangeUSecs = Fit;
+    Head.AnalysisIndex = Params->AnalysisIndex;
+    Head.ColoursCount = Data->CurvesCount;
+
+    for (u32 Index = 0; Index < Data->CurvesCount; ++Index)
+        Colours[Index] = FLAPGraphMinimapPixel(Data->Curves[Index].Colour);
+
+    ListPush(Scratch.MemPool, &Parts, Str8Struct(&Head));
+    ListPush(
+        Scratch.MemPool,
+        &Parts,
+        Str((u8*) Colours, sizeof(u32) * Data->CurvesCount)
+    );
+    ListPush(Scratch.MemPool, &Parts, Params->MinimapSource);
+
+    OCObject Result = OCObjectFromKey(
+        Params->Acc,
+        StrListJoin(Scratch.MemPool, &Parts, NULL),
+        FLAPGraphMinimapObjectCreate,
+        FLAPGraphMinimapObjectDestroy,
+        0
+    );
+
+    ReleaseScratch(Scratch);
+
+    return Result;
+}
+
+INTERNAL
+UI_BOX_CUSTOM_DRAW(FLAPGraphMinimapDraw)
+{
+    FLAPGraphMinimapDrawData* Data = (FLAPGraphMinimapDrawData*) UserData;
+
+    if (!Data->Width)
+        return;
+
+    r1u64 Fit = Data->FitRangeUSecs;
+    r1u64 View = Data->TimeRangeUSecs;
+    r2f32 Strip = Rng(
+        Box->Rect.X0 + (f32) Data->PlotX,
+        Box->Rect.Y0,
+        Box->Rect.X0 + (f32) (Data->PlotX + Data->Width),
+        Box->Rect.Y1
+    );
+
+    if (Data->HasTexture) {
+        DEFER(
+            DPushTex2DSampleKind(TEX2D_SAMPLE_LINEAR), 
+            DPopTex2DSampleKind()
+        ) {
+            DrawImage(
+                Strip,
+                Rng(
+                    0.0f,
+                    0.0f,
+                    (f32) FLAP_GRAPH_MINIMAP_WIDTH,
+                    (f32) FLAP_GRAPH_MINIMAP_HEIGHT
+                ),
+                Data->Texture,
+                Vec(1.0f, 1.0f, 1.0f, 1.0f),
+                0.0f,
+                0.0f,
+                0.0f
+            );
+        }
+    }
+
+    // NOTE(nc): the part of the strip that is not in the view is dimmed, at
+    //         : each side of the view. the view itself has nothing over
+    //         : it. a view that is all past the fit range dims the strip.
+    if (Fit.Min < Fit.Max) {
+        f64 PXPerUSec = (f64) Data->Width / (f64) Length(Fit);
+        f32 X0 = Strip.X0 + (f32) (
+            (f64) (CLAMP(Fit.Min, View.Min, Fit.Max) - Fit.Min) * PXPerUSec
+        );
+        f32 X1 = Strip.X0 + (f32) (
+            (f64) (CLAMP(Fit.Min, View.Max, Fit.Max) - Fit.Min) * PXPerUSec
+        );
+
+        if (View.Min < Fit.Max && View.Max > Fit.Min)
+            X1 = MAX(X1, X0 + 2.0f);
+
+        X0 = FloorF32(X0);
+        X1 = MIN(FloorF32(X1), Strip.X1);
+
+        if (X0 > Strip.X0) {
+            DrawRect(
+                Rng(Strip.X0, Strip.Y0, X0, Strip.Y1),
+                Data->DimColour,
+                0.0f,
+                0.0f,
+                0.0f
+            );
+        }
+
+        if (X1 < Strip.X1) {
+            DrawRect(
+                Rng(X1, Strip.Y0, Strip.X1, Strip.Y1),
+                Data->DimColour,
+                0.0f,
+                0.0f,
+                0.0f
+            );
+        }
+    }
+}
+
 INTERNAL void
 FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
 {
@@ -1271,6 +1698,17 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
     );
     u32 Width = (u32) Length(Rect).X;
     u32 Height = (u32) Length(Rect).Y;
+
+    // NOTE(nc): the minimap takes its height from the bottom of the graph
+    b32 HasMinimap = (
+        (Params->Settings & (1 << FLAP_GRAPH_SETTING_KIND_SHOW_MINIMAP)) &&
+        Params->MinimapSource.Size &&
+        Height > 2 * (u32) Metrics.Minimap
+    );
+
+    if (HasMinimap)
+        Height -= (u32) Metrics.Minimap;
+
     f32 RowHeight = UIHeadPXHeight();
     b32 IsReady = TRUE;
     b32 IsCapture = (
@@ -1332,6 +1770,7 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
 
     for (u32 Index = 0; Index < Program->EmitCount; ++Index) {
         if (
+            (Params->Settings & (1 << FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS_ON_GRAPH)) &&
             Program->Emits[Index].DisplayKind == TOKEN_KIND_FLAG &&
             !Items[Index].IsMissing
         ) {
@@ -1510,6 +1949,65 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
         ++Data->CurvesCount;
     }
 
+    // NOTE(nc): the ranges of the data in view, before the hold replaces
+    //         : them. a double click fits the value axes to them.
+    r1f32 AutoRanges[2] = {
+        Data->ValueRanges[0],
+        Data->ValueRanges[1]
+    };
+    b32 HasAutoRange[2] = {
+        Data->HasRange[0],
+        Data->HasRange[1]
+    };
+
+    // NOTE(nc): the value axis is view state, as the time range is. it is
+    //         : taken from the data in view one time for each fit, and when
+    //         : the graph has none for its unit and its flight. after that
+    //         : only the user moves it.
+    FLAPGraphHold* Hold = Params->Hold;
+    b32 IsLockY = !!(
+        Params->Settings & (1 << FLAP_GRAPH_SETTING_KIND_LOCK_Y)
+    );
+
+    if (Hold) {
+        b32 IsAtFit = (
+            State->IsFitted &&
+            State->TimeRangeUSecs.Min == State->FitRangeUSecs.Min &&
+            State->TimeRangeUSecs.Max == State->FitRangeUSecs.Max
+        );
+        b32 IsFitWaiting = (Hold->FitGeneration != State->FitGeneration);
+        b32 IsStale = (
+            !Hold->IsHeld ||
+            Hold->UnitHash != Params->UnitHash ||
+            Hold->Flight.U64[0] != Params->Flight.U64[0] ||
+            Hold->Flight.U64[1] != Params->Flight.U64[1]
+        );
+
+        if (IsReady && Step && (IsStale || (IsFitWaiting && IsAtFit))) {
+            Hold->UnitHash = Params->UnitHash;
+            Hold->Flight = Params->Flight;
+            Hold->FitGeneration = State->FitGeneration;
+
+            for (u32 Axis = 0; Axis < 2; ++Axis) {
+                Hold->ValueRanges[Axis] = Data->ValueRanges[Axis];
+                Hold->HasRange[Axis] = Data->HasRange[Axis];
+            }
+
+            Hold->IsHeld = TRUE;
+            IsStale = FALSE;
+        }
+
+        if (!IsStale) {
+            for (u32 Axis = 0; Axis < 2; ++Axis) {
+                if (!Hold->HasRange[Axis])
+                    continue;
+
+                Data->ValueRanges[Axis] = Hold->ValueRanges[Axis];
+                Data->HasRange[Axis] = TRUE;
+            }
+        }
+    }
+
     for (u32 Axis = 0; Axis < 2; ++Axis) {
         if (Data->ValueRanges[Axis].Max <= Data->ValueRanges[Axis].Min) {
             Data->ValueRanges[Axis].Min -= 1.0f;
@@ -1679,26 +2177,7 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
         //         : columns that are in the cache. the middle of the view
         //         : stays.
         if (Sig.Scroll.Y) {
-            f64 Factor = 1.0;
-
-            // TODO(nc): check if this is the same on linux
-            // NOTE(nc): Windows sends 120 for one notch, on all machines.
-            //         : the UI divides it by 30, so one notch is 4 here.
-            //         : each of the 4 is the 4th root of 0.8 or of 1.25, so
-            //         : one notch is a zoom of 0.8 or of 1.25. a wheel with
-            //         : a finer step gets a finer zoom.
-            for (
-                i32 Notch = Sig.Scroll.Y;
-                Notch;
-                Notch += (Notch < 0)
-                    ? 1
-                    : -1
-            ) {
-                Factor *= (Notch < 0)
-                    ? 0.9457416090960342
-                    : 1.0573712634405641;
-            }
-
+            f64 Factor = FLAPGraphZoomFactor(Sig.Scroll.Y);
             u64 NewSpan = (u64) ((f64) Span * Factor + 0.5);
 
             // NOTE(nc): a small span does not change when it is rounded
@@ -1718,29 +2197,259 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
 
             State->TimeRangeUSecs.Min = NewMin;
             State->TimeRangeUSecs.Max = NewMin + NewSpan;
+
+            // NOTE(nc): the value axes zoom with time, about their middle
+            for (u32 Axis = 0; Hold && !IsLockY && Axis < 2; ++Axis) {
+                if (!Data->HasRange[Axis])
+                    continue;
+
+                r1f32 Range = Data->ValueRanges[Axis];
+                f32 Middle = 0.5f * (Range.Min + Range.Max);
+                f32 Half = 0.5f * (Range.Max - Range.Min) * (f32) Factor;
+
+                // NOTE(nc): a range that f32 cannot hold does not change
+                if (Middle - Half < Middle + Half) {
+                    Hold->ValueRanges[Axis] = Rng(Middle - Half, Middle + Half);
+                    Hold->HasRange[Axis] = TRUE;
+                }
+            }
+
             AppRequestFrame();
         }
 
-        // NOTE(nc): a pan moves the view in time, by less than a column if
-        //         : the mouse does. the columns do not move in time, so the
-        //         : ones that stay on screen are in the cache.
-        if (UI_PRESSED(Sig)) {
-            UIStoreDragStruct(&State->TimeRangeUSecs);
-        } else if (UI_DRAGGING(Sig)) {
-            r1u64 Start = *UIGetDragStruct(r1u64);
-            f32 Shift = UIDragDelta().X;
-            u64 Delta = (u64) ((f64) AbsF32(Shift) * USecsPerPX);
-            u64 NewMin = Start.Min + Delta;
+        // NOTE(nc): shift and the wheel is the X of the scroll. it zooms
+        //         : the value axes about their middle.
+        if (Sig.Scroll.X && Hold && !IsLockY) {
+            f32 Factor = (f32) FLAPGraphZoomFactor(Sig.Scroll.X);
 
-            if (Shift > 0.0f) {
-                NewMin = (Delta <= Start.Min)
-                    ? Start.Min - Delta
+            for (u32 Axis = 0; Axis < 2; ++Axis) {
+                if (!Data->HasRange[Axis])
+                    continue;
+
+                r1f32 Range = Data->ValueRanges[Axis];
+                f32 Middle = 0.5f * (Range.Min + Range.Max);
+                f32 Half = 0.5f * (Range.Max - Range.Min) * Factor;
+
+                // NOTE(nc): a range that f32 cannot hold does not change
+                if (Middle - Half < Middle + Half) {
+                    Hold->ValueRanges[Axis] = Rng(Middle - Half, Middle + Half);
+                    Hold->HasRange[Axis] = TRUE;
+                }
+            }
+
+            AppRequestFrame();
+        }
+
+        // NOTE(nc): a double click fits the value axes to the data in
+        //         : view. the second press also starts a pan, so the draw
+        //         : data takes the new ranges and the pan starts from them.
+        if (UI_DOUBLE_CLICKED(Sig) && Hold) {
+            for (u32 Axis = 0; Axis < 2; ++Axis) {
+                if (!HasAutoRange[Axis])
+                    continue;
+
+                Hold->ValueRanges[Axis] = AutoRanges[Axis];
+                Hold->HasRange[Axis] = TRUE;
+                Data->ValueRanges[Axis] = AutoRanges[Axis];
+            }
+
+            AppRequestFrame();
+        }
+
+        // NOTE(nc): a pan moves the view in time and in value. the columns
+        //         : do not move in time, so the ones that stay on screen
+        //         : are in the cache. the value axes move by the pixels of
+        //         : the mouse, each at its own scale.
+        if (UI_PRESSED(Sig)) {
+            FLAPGraphDrag Drag = {};
+
+            Drag.TimeRangeUSecs = State->TimeRangeUSecs;
+            Drag.ValueRanges[0] = Data->ValueRanges[0];
+            Drag.ValueRanges[1] = Data->ValueRanges[1];
+            UIStoreDragStruct(&Drag);
+        } else if (UI_DRAGGING(Sig)) {
+            FLAPGraphDrag Start = *UIGetDragStruct(FLAPGraphDrag);
+            v2f32 Shift = UIDragDelta();
+            u64 Delta = (u64) ((f64) AbsF32(Shift.X) * USecsPerPX);
+            u64 NewMin = Start.TimeRangeUSecs.Min + Delta;
+
+            if (Shift.X > 0.0f) {
+                NewMin = (Delta <= Start.TimeRangeUSecs.Min)
+                    ? Start.TimeRangeUSecs.Min - Delta
                     : 0;
             }
 
             State->TimeRangeUSecs.Min = NewMin;
-            State->TimeRangeUSecs.Max = NewMin + Length(Start);
+            State->TimeRangeUSecs.Max = NewMin + Length(Start.TimeRangeUSecs);
+
+            if (Hold && !IsLockY && Data->Height > 1) {
+                for (u32 Axis = 0; Axis < 2; ++Axis) {
+                    if (!Data->HasRange[Axis])
+                        continue;
+
+                    r1f32 Range = Start.ValueRanges[Axis];
+                    f32 Move = Shift.Y * (
+                        (Range.Max - Range.Min) / (f32) (Data->Height - 1)
+                    );
+
+                    Hold->ValueRanges[Axis] = Rng(
+                        Range.Min + Move,
+                        Range.Max + Move
+                    );
+                    Hold->HasRange[Axis] = TRUE;
+                }
+            }
+
             AppRequestFrame();
+        }
+    }
+
+    // NOTE(nc): a right click is the settings of the view, as
+    //         : the small palette, at the mouse. the query hangs below its
+    //         : anchor box, so the Y of the offset is from the bottom.
+    if (UI_RIGHT_CLICKED(Sig)) {
+        State->HotKey = Params->Key;
+        State->HasHotKey = TRUE;
+        AppCmd(
+            APP_COMMAND_KIND_PUSH_QUERY,
+            __Registers.UI = Box->Key,
+            __Registers.OffsetPX = Vec(
+                UIMouse().X - Box->Rect.X0,
+                UIMouse().Y - Box->Rect.Y1
+            ),
+            __Registers.Expression = ArenaPushStrFmt(
+                UIBuildMemPool(),
+                "query:config.$%llx",
+                Registers()->View
+            ),
+            __Registers.DoImplicitRoot = TRUE,
+            __Registers.DoSmall = TRUE,
+            __Registers.DoLister = TRUE
+        );
+    }
+
+    // NOTE(nc): the minimap is the fit range, with a box for the view. a
+    //         : drag of the box is a pan, a drag of an edge changes the
+    //         : span, and a press outside the box puts its middle at the
+    //         : mouse. it moves time only.
+    if (HasMinimap) {
+        r1u64 Fit = State->FitRangeUSecs;
+        b32 HasFit = (State->IsFitted && Fit.Min < Fit.Max);
+        OCObject Object = {};
+        FLAPGraphMinimapDrawData* MiniData = ArenaPushArrayZero(
+            UIBuildMemPool(),
+            FLAPGraphMinimapDrawData,
+            1
+        );
+
+        if (HasFit) {
+            Object = FLAPGraphMinimapObject(Params, Data, Fit);
+
+            // NOTE(nc): the cache has not made the texture yet
+            if (!Object.V[1])
+                AppRequestFrame();
+        }
+
+        MiniData->Texture.U64[0] = Object.V[0];
+        MiniData->HasTexture = (Object.V[0] != 0);
+        MiniData->FitRangeUSecs = Fit;
+        MiniData->TimeRangeUSecs = State->TimeRangeUSecs;
+        MiniData->DimColour = UIColourFromName("background"_s8);
+        MiniData->DimColour.W = 0.6f;
+        MiniData->PlotX = Data->PlotX;
+        MiniData->Width = Data->Width;
+
+        UISetNextPreferredSize(AXIS_2D_X, UI_PERCENT(1.0f, 0.0f));
+        UISetNextPreferredSize(AXIS_2D_Y, UI_PX(Metrics.Minimap, 1.0f));
+
+        UIBox* MiniBox = UIBuildBoxFromStrFmt(
+            UI_BOX_KIND_MOUSE_CLICKABLE,
+            "###graph_minimap_%u",
+            Params->Key
+        );
+
+        UIBoxEquipCustomDraw(MiniBox, FLAPGraphMinimapDraw, MiniData);
+
+        UISignal MiniSig = UISignalFromBox(MiniBox);
+
+        if (HasFit && Data->Width) {
+            f64 USecsPerPX = (f64) Length(Fit) / (f64) Data->Width;
+            f32 StripX0 = MiniBox->Rect.X0 + (f32) Data->PlotX;
+            r1u64 View = State->TimeRangeUSecs;
+            f32 WindowX0 = StripX0 + (f32) (
+                ((f64) View.Min - (f64) Fit.Min) / USecsPerPX
+            );
+            f32 WindowX1 = StripX0 + (f32) (
+                ((f64) View.Max - (f64) Fit.Min) / USecsPerPX
+            );
+            f32 MouseX = UIMouse().X;
+            FLAPGraphMinimapDragKind Kind = FLAP_GRAPH_MINIMAP_DRAG_KIND_MOVE;
+
+            if (AbsF32(MouseX - WindowX0) <= Metrics.SnapRadius)
+                Kind = FLAP_GRAPH_MINIMAP_DRAG_KIND_RESIZE_MIN;
+            else if (AbsF32(MouseX - WindowX1) <= Metrics.SnapRadius)
+                Kind = FLAP_GRAPH_MINIMAP_DRAG_KIND_RESIZE_MAX;
+
+            if (UI_HOVERING(MiniSig)) {
+                MiniBox->HoverCursor = (Kind == FLAP_GRAPH_MINIMAP_DRAG_KIND_MOVE)
+                    ? CURSOR_KIND_HAND_POINT
+                    : CURSOR_KIND_LEFT_RIGHT;
+            }
+
+            if (UI_PRESSED(MiniSig)) {
+                FLAPGraphMinimapDrag Drag = {};
+
+                AppCmd(APP_COMMAND_KIND_FOCUS_PANEL);
+
+                if (
+                    Kind == FLAP_GRAPH_MINIMAP_DRAG_KIND_MOVE &&
+                    (MouseX < WindowX0 || MouseX > WindowX1)
+                ) {
+                    u64 ViewSpan = Length(View);
+                    f64 NewMin = (f64) Fit.Min + (
+                        (f64) (MouseX - StripX0) * USecsPerPX
+                    ) - 0.5 * (f64) ViewSpan;
+
+                    View.Min = (NewMin > 0.0) ? (u64) NewMin : 0;
+                    View.Max = View.Min + ViewSpan;
+                    State->TimeRangeUSecs = View;
+                }
+
+                Drag.TimeRangeUSecs = View;
+                Drag.Kind = Kind;
+                UIStoreDragStruct(&Drag);
+                AppRequestFrame();
+            } else if (UI_DRAGGING(MiniSig)) {
+                FLAPGraphMinimapDrag Drag = *UIGetDragStruct(FLAPGraphMinimapDrag);
+                f64 Delta = (f64) UIDragDelta().X * USecsPerPX;
+                f64 NewMin = (f64) Drag.TimeRangeUSecs.Min;
+                f64 NewMax = (f64) Drag.TimeRangeUSecs.Max;
+                // NOTE(nc): one microsecond for each column is the limit
+                f64 MinSpan = (f64) MAX(Count, (u32) 1);
+
+                if (Drag.Kind != FLAP_GRAPH_MINIMAP_DRAG_KIND_RESIZE_MAX)
+                    NewMin += Delta;
+
+                if (Drag.Kind != FLAP_GRAPH_MINIMAP_DRAG_KIND_RESIZE_MIN)
+                    NewMax += Delta;
+
+                if (Drag.Kind == FLAP_GRAPH_MINIMAP_DRAG_KIND_MOVE && NewMin < 0.0) {
+                    NewMax -= NewMin;
+                    NewMin = 0.0;
+                }
+
+                if (Drag.Kind == FLAP_GRAPH_MINIMAP_DRAG_KIND_RESIZE_MIN)
+                    NewMin = MIN(NewMin, NewMax - MinSpan);
+
+                NewMin = MAX(NewMin, 0.0);
+
+                if (Drag.Kind == FLAP_GRAPH_MINIMAP_DRAG_KIND_RESIZE_MAX)
+                    NewMax = MAX(NewMax, NewMin + MinSpan);
+
+                State->TimeRangeUSecs.Min = (u64) NewMin;
+                State->TimeRangeUSecs.Max = (u64) NewMax;
+                AppRequestFrame();
+            }
         }
     }
 }
