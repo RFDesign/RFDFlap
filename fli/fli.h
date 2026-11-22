@@ -10,7 +10,7 @@
 
 // @defines____________________________________________________________________
 #define FLI_MAGIC_NUMBER     0x494C462E
-#define FLI_ENCODING_VERSION 2
+#define FLI_ENCODING_VERSION 3
 
 #define FLI_TIME_BLOCK_SHIFT   12
 #define FLI_TIME_BLOCK_SAMPLES (1ULL << FLI_TIME_BLOCK_SHIFT)
@@ -146,6 +146,7 @@ enum FLIParseStatus {
     X(u64,    EndTimeUSecs)          \
     X(u64,    RecordCount)           \
     X(u64,    SkippedRecordCount)    \
+    X(u64,    StartUnixUSecs)        \
  
 
 #define FLI_MESSAGETYPE_XLIST   \
@@ -548,6 +549,7 @@ struct FLIFileInfo {
     u64    EndTimeUSecs;
     u64    RecordCount;
     u64    SkippedRecordCount;
+    u64    StartUnixUSecs;
 };
  
 struct FLIMessageType {
@@ -813,6 +815,7 @@ struct FLIBakeFileInfo {
     u64    EndTimeUSecs;
     u64    RecordCount;
     u64    SkippedRecordCount;
+    u64    StartUnixUSecs;
 };
  
 FLI_CHUNK_LIST_TYPES(BakeMessageType);

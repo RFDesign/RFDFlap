@@ -33,3 +33,4 @@ tests/collisions/*.o
 tests/collisions/collisions
 .tipi/
 compile_commands.json
+tools/

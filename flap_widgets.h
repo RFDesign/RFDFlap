@@ -20,6 +20,10 @@
 #define FLAP_GRAPH_MINIMAP_HEIGHT 32
 #define FLAP_GRAPH_MINIMAP_LANE   3
 #define FLAP_GRAPH_MODE_COLOURS   8
+#define FLAP_GPS_EPOCH_UNIX_SECS  315964800ULL
+#define FLAP_GPS_WEEK_SECS        604800ULL
+#define FLAP_GPS_LEAP_SECS        18ULL
+#define FLAP_DAY_SECS             86400ULL
 
 typedef u32 FLAPGraphCaptureKind;
 enum : u32 {
@@ -36,7 +40,15 @@ enum : u32 {
     FLAP_GRAPH_SETTING_KIND_SHOW_MODES_ON_GRAPH,
     FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS_ON_MINIMAP,
     FLAP_GRAPH_SETTING_KIND_SHOW_MODES_ON_MINIMAP,
+    FLAP_GRAPH_SETTING_KIND_TIME_FROM_CURSOR,
     FLAP_GRAPH_SETTING_KIND_COUNT
+};
+
+typedef u32 FLAPGraphTimeKind;
+enum : u32 {
+    FLAP_GRAPH_TIME_KIND_RELATIVE,
+    FLAP_GRAPH_TIME_KIND_LOCAL,
+    FLAP_GRAPH_TIME_KIND_COUNT
 };
 
 typedef u32 FLAPGraphMinimapDragKind;
@@ -112,6 +124,13 @@ struct FLAPGraphHold {
     u32    FitGeneration;
 };
 
+struct FLAPGraphClock {
+    FLIKey Flight;
+    u64    LocalStartUSecs;
+    b32    IsResolved;
+    b32    Has;
+};
+
 struct FLAPGraphDrag {
     r1u64 TimeRangeUSecs;
     r1f32 ValueRanges[2];
@@ -168,22 +187,23 @@ struct FLAPGraphState {
 };
 
 struct FLAPGraphParams {
-    Arena*            MemPool;
-    Access*           Acc;
-    FLIParsed*        FLI;
-    FLVProgram const* Program;
-    FLVRenderItem*    Items;
-    FLAPGraphState*   State;
-    FLAPGraphColumns* Columns;
-    FLAPGraphHold*    Hold;
-    Str8              MinimapSource;
-    u64               UnitHash;
-    FLIKey            Flight;
-    FLAPGraphMetrics  Metrics;
-    u32               Key;
-    u32               Settings;
-    u32               AnalysisIndex;
-    u32               __Padding;
+    Arena*                MemPool;
+    Access*               Acc;
+    FLIParsed*            FLI;
+    FLVProgram const*     Program;
+    FLVRenderItem*        Items;
+    FLAPGraphState*       State;
+    FLAPGraphColumns*     Columns;
+    FLAPGraphHold*        Hold;
+    FLAPGraphClock const* Clock;
+    Str8                  MinimapSource;
+    u64                   UnitHash;
+    FLIKey                Flight;
+    FLAPGraphMetrics      Metrics;
+    u32                   Key;
+    u32                   Settings;
+    u32                   AnalysisIndex;
+    FLAPGraphTimeKind     TimeKind;
 };
 
 struct FLAPGraphDrawCurve {
@@ -211,6 +231,7 @@ struct FLAPGraphDrawData {
     FLIMode const*        Modes;
     FLVModeName const*    ModeNames;
     v4f32*                ModeColours;
+    FLAPGraphClock const* Clock;
     r1u64                 TimeRangeUSecs;
     r1u64                 View;
     u64                   StepUSecs;
@@ -230,6 +251,8 @@ struct FLAPGraphDrawData {
     u32                   Height;
     u32                   ModesCount;
     u32                   ModeNamesCount;
+    b32                   IsTimeFromCursor;
+    u32                   __Padding;
 };
 
 // @runtime____________________________________________________________________

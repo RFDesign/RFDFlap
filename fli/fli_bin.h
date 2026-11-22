@@ -14,6 +14,10 @@
 #define BIN_TYPE_COUNT       256
 #define BIN_MAX_FIELD_COUNT  16
 
+#define BIN_GPS_EPOCH_UNIX_SECS 315964800ULL
+#define BIN_GPS_WEEK_SECS       604800ULL
+#define BIN_GPS_LEAP_SECS       18ULL
+
 typedef u32 B2FSpecialKind;
 enum : u32 {
     B2F_SPECIAL_KIND_NONE,
@@ -59,6 +63,10 @@ struct B2FFormat {
     u32                 FieldCount;
     u32                 TimeField;
     u32                 InstanceField;
+    u32                 WeekField;
+    u32                 MSecsField;
+    u32                 StatusField;
+    b32                 HasClock;
     Str8                FieldNames[BIN_MAX_FIELD_COUNT];
     u8                  FieldChars[BIN_MAX_FIELD_COUNT];
     u8                  FieldOffsets[BIN_MAX_FIELD_COUNT];

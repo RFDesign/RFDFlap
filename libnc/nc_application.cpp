@@ -1979,7 +1979,7 @@ AppNameSchemaInfo APP_NAME_SCHEMA_INFO_TABLE[12] = {
     {
         Str8Lit("flv_view"),
         FALSE,
-        Str8Lit("@inherit(tab) x:\n{\n  @display_name('View File') @description(\"The FLV file that the tab shows.\")\n  'file': @no_relativise path,\n  @default(0) @display_name('Auto Fit Y') @description(\"Fits the value axis of a graph to the data in view as the view moves. When off, the value axis is held from the last fit.\")\n  @default(0) @display_name('Lock Y Axis') @description(\"Keeps the value axis of a graph where it is. A drag moves the view in time only.\")\n  'lock_y': bool,\n  @default(0) @display_name('Show Minimap') @description(\"Shows a small picture of the whole flight under each graph, with a box for the view.\")\n  'show_minimap': bool,\n  @default(0) @display_name('Show Flags On Graph') @description(\"Draws the flags of an analysis on its graph.\")\n  'show_flags_on_graph': bool,\n  @default(0) @display_name('Show Modes On Graph') @description(\"Tints the plot of a graph with the flight mode.\")\n  'show_modes_on_graph': bool,\n  @default(0) @display_name('Show Flags On Minimap') @description(\"Draws the flags of an analysis on its minimap.\")\n  'show_flags_on_minimap': bool,\n  @default(0) @display_name('Show Modes On Minimap') @description(\"Tints the minimap of a graph with the flight mode.\")\n  'show_modes_on_minimap': bool,\n}\n")
+        Str8Lit("@inherit(tab) x:\n{\n  @display_name('View File') @description(\"The FLV file that the tab shows.\")\n  'file': @no_relativise path,\n  @default(0) @display_name('Auto Fit Y') @description(\"Fits the value axis of a graph to the data in view as the view moves. When off, the value axis is held from the last fit.\")\n  @default(0) @display_name('Lock Y Axis') @description(\"Keeps the value axis of a graph where it is. A drag moves the view in time only.\")\n  'lock_y': bool,\n  @default(0) @display_name('Show Minimap') @description(\"Shows a small picture of the whole flight under each graph, with a box for the view.\")\n  'show_minimap': bool,\n  @default(0) @display_name('Show Flags On Graph') @description(\"Draws the flags of an analysis on its graph.\")\n  'show_flags_on_graph': bool,\n  @default(0) @display_name('Show Modes On Graph') @description(\"Tints the plot of a graph with the flight mode.\")\n  'show_modes_on_graph': bool,\n  @default(0) @display_name('Show Flags On Minimap') @description(\"Draws the flags of an analysis on its minimap.\")\n  'show_flags_on_minimap': bool,\n  @default(0) @display_name('Show Modes On Minimap') @description(\"Tints the minimap of a graph with the flight mode.\")\n  'show_modes_on_minimap': bool,\n  @default(0) @display_name('Time') @description(\"Relative Time is the seconds from the start of the file. Local Time is the local time of day, from the GPS time of the flight. A flight with no GPS time shows Relative Time.\")\n  'time_mode': @options('Relative Time', 'Local Time') u64,\n  @default(0) @display_name('Relative To Cursor') @description(\"Shows the time axis of a graph as the time before and after the cursor, with the time of the cursor at its line. With no cursor on a graph, the time axis has no labels. Turning this on sets Time to Local Time.\")\n  'time_from_cursor': bool,\n}\n")
     }
 };
 
@@ -5773,6 +5773,7 @@ AppCell(AppCellParams* Params, Str8 String)
     b32 IsFocusActiveDisabled = (!IsFocusActive && UIHeadFocusActive() == UI_FOCUS_KIND_ON);
     b32 BuildToggleSwitch = !!(Params->Kind & APP_CELL_KIND_TOGGLE_SWITCH) && !IsFocusActive;
     b32 BuildSlider = !!(Params->Kind & APP_CELL_KIND_SLIDER) && !IsFocusActive;
+    b32 BuildDropdown = !!(Params->Kind & APP_CELL_KIND_DROPDOWN) && !IsFocusActive;
     b32 BuildBindings = !!(Params->Kind & APP_CELL_KIND_BINDINGS) && !IsFocusActive;
     b32 BuildLHSNameDesc = (Params->MetaFancyStrings.NodeCount || Params->Description.Size);
     b32 BuildLineEdit = (Params->PreEditValue.Size || Params->ValueFancyStrings.NodeCount);
@@ -5780,7 +5781,12 @@ AppCell(AppCellParams* Params, Str8 String)
     FancyStrList LHSNameFancyStrings = Params->MetaFancyStrings;
     FancyStrList ValueNameFancyStrings = Params->ValueFancyStrings;
     FancyStrList NoteFancyStrings = Params->NoteFancyStrings;
-    Str8 AutoCompleteHintString = {};
+    Str8 AutoCompleteHintString = ""_s8;
+
+    // NOTE(nc): a drop down shows the name of its option, so the cell does
+    //         : not show the index of it too.
+    if (BuildDropdown)
+        MemZero(&ValueNameFancyStrings, sizeof(ValueNameFancyStrings));
 
     if (IsFocusActive)
         AutoCompleteHintString = UIAutoComplete();
@@ -5982,6 +5988,7 @@ AppCell(AppCellParams* Params, Str8 String)
         Params->Kind & APP_CELL_KIND_EMPTY_EDIT_BTN &&
         !IsFocusActive &&
         !IsFocusActiveDisabled &&
+        !BuildDropdown &&
         BuildLHSNameDesc &&
         BuildLineEdit &&
         !ValueNameFancyStrings.TotalSize
@@ -6043,7 +6050,11 @@ AppCell(AppCellParams* Params, Str8 String)
         }
     }
 
-    if (Params->Kind & APP_CELL_KIND_REVERT_BTN && !IsFocusActive && !IsFocusActiveDisabled) {
+    if (
+        Params->Kind & APP_CELL_KIND_REVERT_BTN && 
+        !IsFocusActive && 
+        !IsFocusActiveDisabled
+    ) {
         UIParent(EditBox) {
             UIPreferredWidth(UI_EM(2.0f, 1.0f)) {
                 UITag("."_s8) {
@@ -6091,7 +6102,7 @@ AppCell(AppCellParams* Params, Str8 String)
                     }
                 }
 
-                if (BuildToggleSwitch || BuildSlider)
+                if (BuildToggleSwitch || BuildSlider || BuildDropdown)
                     UISpacer(UI_EM(1.0f, 1.0f));
             }
         }
@@ -6323,6 +6334,42 @@ AppCell(AppCellParams* Params, Str8 String)
                     }
                 }
             }
+
+            UISpacer(UI_EM(1.0f, 1.0f));
+        }
+    }
+
+    if (BuildDropdown) {
+        UIParent(Box) {
+            f32 HeightPX = MIN(CeilF32(UIHeadFontSize() * 2.25f), UIHeadPXHeight());
+            f32 PaddingPX = FloorF32((UIHeadPXHeight() - HeightPX) / 2.0f);
+            i64 Hovered = -1;
+
+            UIPreferredWidth(UI_SUM_OF_CHILDREN(1.0f)) {
+                UIHeightFill() {
+                    UIColumn() {
+                        UIPadding(UI_PX(PaddingPX, 1.0f)) {
+                            UIRow() {
+                                UIPreferredHeight(UI_PX(HeightPX, 1.0f)) {
+                                    UICornerRadius(FloorF32(UIHeadFontSize() * 0.5f)) {
+                                        AppFont(APP_FONT_SLOT_MAIN) {
+                                            AppDropDown(
+                                                Params->DropdownIndex,
+                                                Params->DropdownOptions,
+                                                &Hovered,
+                                                "###dropdown"_s8
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (Params->Kind & APP_CELL_KIND_PREVIEW_ON_HOVER)
+                *Params->DropdownHovered = Hovered;
 
             UISpacer(UI_EM(1.0f, 1.0f));
         }
@@ -9828,6 +9875,15 @@ AppFrame(void)
             },
             {
                 "range1"_s8,
+                FALSE,
+                FALSE,
+                FALSE,
+                NULL,
+                NULL,
+                {}
+            },
+            {
+                "options"_s8,
                 FALSE,
                 FALSE,
                 FALSE,
@@ -20573,4 +20629,170 @@ AppCommandListMenuButtons(
     }
 
     ReleaseScratch(Scratch);
+}
+
+Str8Array
+AppThemeNames(Arena* MemPool)
+{
+    TempArena Scratch = GetScratch(&MemPool, 1);
+    Str8List Names = {};
+
+    for EACH_ENUM(AppThemePreset, P, APP_THEME_PRESET_COUNT)
+        ListPush(Scratch.MemPool, &Names, APP_THEME_PRESET_DISPLAY_STR_TABLE[P]);
+
+    Str8 ThemeFolder = ArenaPushStrFmt(
+        Scratch.MemPool,
+        "%S/%s/themes",
+        PRINT_STR(GetProcessProperties()->UserProgramDataPath),
+        NC_DATA_DIR
+    );
+    FileIter* Iter = SystemFileIterBegin(
+        Scratch.MemPool,
+        ThemeFolder,
+        SYS_FILE_ITER_SKIP_DIRS
+    );
+
+    for (
+        FileInfo Info = {};
+        SystemFileIterNext(Scratch.MemPool, Iter, &Info);
+    ) {
+        ListPush(
+            Scratch.MemPool,
+            &Names,
+            ArenaPushStrCpy(MemPool, Info.Name)
+        );
+    }
+
+    SystemFileIterEnd(Iter);
+
+    Str8Array Result = StrArrayFromList(MemPool, &Names);
+
+    ReleaseScratch(Scratch);
+
+    return Result;
+}
+
+// NOTE(nc): the closed box is as wide as its text and takes the height the
+//         : caller pushed. the list entries have their own height and are as
+//         : wide as the longest option, which is measured only when open.
+UISignal
+AppDropDown(
+    i64* SelectedIndex, 
+    Str8Array Options, 
+    i64* HoveredIndex, 
+    Str8 String
+) {
+    UIKey Key = UIKeyFromStr(UIActiveSeedKey(), String);
+    UIKey MenuKey = UIKeyFromStr(Key, "###dropdown_menu"_s8);
+    b32 MenuOpen = UIContextMenuIsOpen(MenuKey);
+    f32 PaddingPX = CeilF32(UIHeadFontSize() * 0.75f);
+    Str8 Name = (*SelectedIndex >= 0 && (u64) *SelectedIndex < Options.Count)
+        ? Options.Data[*SelectedIndex]
+        : "Select..."_s8;
+
+    *HoveredIndex = -1;
+
+    UISetNextHoverCursor(CURSOR_KIND_HAND_POINT);
+    UISetNextChildLayoutAxis(AXIS_2D_X);
+    UISetNextPreferredWidth(UI_SUM_OF_CHILDREN(1.0f));
+
+    UIBox* Box = UIBuildBoxFromStr(
+        (
+            UI_BOX_KIND_CLICKABLE |
+            UI_BOX_KIND_DRAW_BACKGROUND |
+            UI_BOX_KIND_DRAW_BORDER |
+            UI_BOX_KIND_DRAW_HOT_EFFECTS |
+            UI_BOX_KIND_DRAW_ACTIVE_EFFECTS
+        ),
+        String
+    );
+
+    UIParent(Box) {
+        UITextAlignment(UI_TEXT_ALIGN_LEFT) {
+            UIPreferredWidth(UI_TEXT_DIM(PaddingPX * 2.0f, 1.0f)) {
+                UILabel(Name);
+            }
+        }
+
+        UIFont(UIIconFont()) {
+            UIPreferredWidth(UI_EM(1.2f, 1.0f)) {
+                UITextAlignment(UI_TEXT_ALIGN_CENTRE) {
+                    UIBox* Arrow = UIBuildBoxFromStr(
+                        UI_BOX_KIND_DRAW_TEXT, 
+                        "###arrow"_s8
+                    );
+
+                    UIBoxEquipDisplayStr(
+                        Arrow, 
+                        MenuOpen ? 
+                        UIIconStringFromIconKind(UI_ICON_KIND_UP_CARET) : 
+                        UIIconStringFromIconKind(UI_ICON_KIND_DOWN_CARET)
+                    );
+                }
+            }
+        }
+
+        UISpacer(UI_EM(0.5f, 1.0f));
+    }
+
+    UISignal Sig = UISignalFromBox(Box);
+
+    if (UI_CLICKED(Sig)) {
+        if (MenuOpen)
+            UIContextMenuClose();
+        else
+            UIContextMenuOpen(MenuKey, Box->Key, Vec(0.0f, Length(Box->Rect).Y));
+    }
+
+    UIContextMenu(MenuKey) {
+        f32 WidthPX = Length(Box->Rect).X;
+
+        for (u64 I = 0; I < Options.Count; ++I) {
+            f32 OptionPX = FontDimensionsFromTagSizeString(
+                UIHeadFont(),
+                UIHeadFontSize(),
+                0.0f,
+                0.0f,
+                Options.Data[I]
+            ).X + PaddingPX * 2.0f;
+
+            WidthPX = MAX(WidthPX, OptionPX);
+        }
+
+        UIPreferredWidth(UI_PX(WidthPX, 1.0f)) {
+            UIPreferredHeight(UI_EM(2.5f, 1.0f)) {
+                UITextAlignment(UI_TEXT_ALIGN_LEFT) {
+                    // NOTE(nc): the entry under the cursor is reported, or 
+                    //         : failing that the entry selected with the 
+                    //         : keyboard.
+                    UIKey SelectedKey = GetTLS()->UI_STATE->ContextMenuRoot->DefaultNavFocusHotKey;
+                    i64 KeyboardIndex = -1;
+
+                    for (u64 I = 0; I < Options.Count; ++I) {
+                        UISignal ItemSig = UIButton(
+                            "%S###item_%llu", 
+                            PRINT_STR(Options.Data[I]), 
+                            I
+                        );
+
+                        if (UI_HOVERING(ItemSig))
+                            *HoveredIndex = (i64) I;
+
+                        if (ItemSig.Box->Key == SelectedKey)
+                            KeyboardIndex = (i64) I;
+
+                        if (UI_CLICKED(ItemSig)) {
+                            *SelectedIndex = (i64) I;
+                            UIContextMenuClose();
+                        }
+                    }
+
+                    if (*HoveredIndex < 0)
+                        *HoveredIndex = KeyboardIndex;
+                }
+            }
+        }
+    }
+
+    return Sig;
 }

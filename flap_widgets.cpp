@@ -38,6 +38,10 @@ global readonly FLAPGraphSettingInfo FLAP_GRAPH_SETTING_INFO_TABLE[FLAP_GRAPH_SE
     {
         Str8Lit("show_modes_on_minimap"),
         Str8Lit("Show Modes On Minimap")
+    },
+    {
+        Str8Lit("time_from_cursor"),
+        Str8Lit("Relative To Cursor")
     }
 };
 
@@ -665,6 +669,130 @@ FLAPGraphTickStep(f32 Range, u32 MaxTicks)
                     ? 5.0f 
                     : 10.0f
     );
+
+    return Result;
+}
+
+// NOTE(nc): the step of the time labels. a time of day is read in the steps
+//         : of a clock, and not in 1, 2 and 5. below one second the steps
+//         : are the same, and above one day the step is whole days.
+INTERNAL u64
+FLAPGraphTickUSecs(u64 SpanUSecs, u32 MaxTicks, b32 IsClock)
+{
+    readonly local u32 ClockSecs[] = {
+           1,    2,     5,    10,    15,    30,
+          60,  120,   300,   600,   900,  1800,
+        3600, 7200, 10800, 21600, 43200, 86400
+    };
+    f32 TickStep = FLAPGraphTickStep(
+        (f32) SpanUSecs / 1000000.0f,
+        MaxTicks
+    );
+    u64 Result = MAX((u64) (TickStep * 1000000.0f + 0.5f), (u64) 1);
+
+    if (IsClock && Result > MILLION(1)) {
+        u64 Raw = SpanUSecs / MaxTicks;
+        u64 Day = FLAP_DAY_SECS * MILLION(1);
+
+        Result = ((Raw + Day - 1) / Day) * Day;
+
+        for (u32 Index = 0; Index < ARRAY_COUNT(ClockSecs); ++Index) {
+            u64 ClockUSecs = (u64) ClockSecs[Index] * MILLION(1);
+
+            if (Raw <= ClockUSecs) {
+                Result = ClockUSecs;
+                break;
+            }
+        }
+    }
+
+    return Result;
+}
+
+// NOTE(nc): a time of the flight as text. with a clock it is the local
+//         : time of day, and the date too if HasDate. with no clock it is
+//         : the seconds from the start of the file. Digits is the digits
+//         : after the second: 0, 3 or 6.
+INTERNAL Str8
+FLAPGraphStrFromTime(
+    Arena* MemPool,
+    FLAPGraphClock const* Clock,
+    u64 TimeUSecs,
+    u32 Digits,
+    b32 HasDate
+) {
+    Str8 Result = {};
+
+    if (!Clock || !Clock->Has) {
+        u64 Secs = TimeUSecs / MILLION(1);
+        u64 USecs = TimeUSecs % MILLION(1);
+
+        Result = (Digits == 6)
+            ? ArenaPushStrFmt(MemPool, "%llu.%06llus", Secs, USecs)
+            : (Digits == 3)
+                ? ArenaPushStrFmt(
+                    MemPool,
+                    "%llu.%03llus",
+                    Secs,
+                    USecs / THOUSAND(1)
+                )
+                : ArenaPushStrFmt(MemPool, "%llus", Secs);
+    } else {
+        u64 LocalUSecs = Clock->LocalStartUSecs + TimeUSecs;
+        u64 Secs = LocalUSecs / MILLION(1);
+        u64 USecs = LocalUSecs % MILLION(1);
+        u64 DaySecs = Secs % FLAP_DAY_SECS;
+        Str8 Date = ""_s8;
+        Str8 Fraction = ""_s8;
+
+        // NOTE(nc): the days from 1970 as a date. the year starts in March
+        //         : here, so the leap day is its last day.
+        if (HasDate) {
+            u64 Days = Secs / FLAP_DAY_SECS + 719468;
+            u64 Era = Days / 146097;
+            u64 DayOfEra = Days % 146097;
+            u64 YearOfEra = (
+                DayOfEra - DayOfEra / 1460 + DayOfEra / 36524 - DayOfEra / 146096
+            ) / 365;
+            u64 DayOfYear = DayOfEra - (
+                365 * YearOfEra + YearOfEra / 4 - YearOfEra / 100
+            );
+            u64 MonthIndex = (5 * DayOfYear + 2) / 153;
+            u64 Day = DayOfYear - (153 * MonthIndex + 2) / 5 + 1;
+            u64 Month = (MonthIndex < 10)
+                ? MonthIndex + 3
+                : MonthIndex - 9;
+            u64 Year = YearOfEra + Era * 400 + ((Month <= 2) ? 1 : 0);
+
+            Date = ArenaPushStrFmt(
+                MemPool,
+                "%04llu-%02llu-%02llu ",
+                Year,
+                Month,
+                Day
+            );
+        }
+
+        if (Digits == 6) {
+            Fraction = ArenaPushStrFmt(MemPool, ".%06llu", USecs);
+        } else if (Digits == 3) {
+            Fraction = ArenaPushStrFmt(
+                MemPool,
+                ".%03llu",
+                USecs / THOUSAND(1)
+            );
+        }
+
+        Result = ArenaPushStrFmt(
+            MemPool,
+            "%S%02llu:%02llu:%02llu%S",
+            PRINT_STR(Date),
+            DaySecs / 3600,
+            (DaySecs / 60) % 60,
+            DaySecs % 60,
+            PRINT_STR(Fraction)
+        );
+    }
 
     return Result;
 }
@@ -1333,24 +1461,48 @@ UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
         }
     }
 
-    // NOTE(nc): time labels
+    // NOTE(nc): time labels. the ticks are at whole steps from an origin:
+    //         : the start of the file, the local midnight, or the cursor.
+    //         : from the cursor, the labels are the time before and after
+    //         : it, and its own time is at its line. with no cursor, that
+    //         : axis has no labels.
     u64 Span = Length(ViewRange);
+    FLAPGraphClock const* Clock = Data->Clock;
+    b32 IsLocal = (Clock && Clock->Has);
+    b32 IsFromCursor = Data->IsTimeFromCursor;
 
-    if (Step && Span) {
+    if (Step && Span && (!IsFromCursor || Data->HasCursor)) {
         u32 MaxTicks = MAX(
             (u32) ((f32) Width / MAX(Metrics.TimeTick, 1.0f)),
             (u32) 1
         );
-        f32 TickStep = FLAPGraphTickStep(
-            (f32) Span / 1000000.0f,
-            MaxTicks
+        u64 TickUSecs = FLAPGraphTickUSecs(
+            Span,
+            MaxTicks,
+            IsLocal && !IsFromCursor
         );
-        u64 TickUSecs = MAX((u64) (TickStep * 1000000.0f + 0.5f), (u64) 1);
+        u32 Digits = (TickUSecs >= MILLION(1))
+            ? 0
+            : (TickUSecs >= THOUSAND(1))
+                ? 3
+                : 6;
+        u64 CursorUSecs = Data->CursorTimeUSecs;
+        u64 Origin = 0;
+
+        if (IsFromCursor)
+            Origin = CursorUSecs;
+        else if (IsLocal)
+            Origin = TickUSecs - (Clock->LocalStartUSecs % TickUSecs);
+
+        // NOTE(nc): the first tick at or after the start of the view
+        u64 Phase = Origin % TickUSecs;
+        u64 First = ViewRange.Min - (ViewRange.Min % TickUSecs) + Phase;
+
+        if (First < ViewRange.Min)
+            First += TickUSecs;
 
         for (
-            u64 TimeUSecs = (
-                (ViewRange.Min + TickUSecs - 1) / TickUSecs
-            ) * TickUSecs;
+            u64 TimeUSecs = First;
             TimeUSecs < ViewRange.Max;
             TimeUSecs += TickUSecs
         ) {
@@ -1359,18 +1511,61 @@ UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
                     (f64) (TimeUSecs - ViewRange.Min) * PXPerUSec
                 )
             );
-            Str8 String = (TickUSecs >= MILLION(1))
-                ? ArenaPushStrFmt(
+            Str8 String = {};
+
+            if (!IsFromCursor) {
+                String = FLAPGraphStrFromTime(
                     Scratch.MemPool,
-                    "%llus",
-                    TimeUSecs / MILLION(1)
-                )
-                : ArenaPushStrFmt(
-                    Scratch.MemPool,
-                    "%llu.%03llus",
-                    TimeUSecs / MILLION(1),
-                    (TimeUSecs % MILLION(1)) / THOUSAND(1)
+                    Clock,
+                    TimeUSecs,
+                    Digits,
+                    FALSE
                 );
+            } else if (TimeUSecs == CursorUSecs) {
+                // NOTE(nc): the time of the cursor, with its middle at the
+                //         : line of the cursor. it stays in the plot.
+                String = FLAPGraphStrFromTime(
+                    Scratch.MemPool,
+                    Clock,
+                    TimeUSecs,
+                    MAX(Digits, (u32) 3),
+                    FALSE
+                );
+
+                f32 TextWidth = FontDimensionsFromTagSizeString(
+                    Box->Font,
+                    Box->FontSize,
+                    0.0f,
+                    Box->TabSize,
+                    String
+                ).X;
+
+                X = CLAMP(
+                    PlotRect.X0,
+                    FloorF32(X - 0.5f * TextWidth),
+                    MAX(PlotRect.X0, PlotRect.X1 - TextWidth)
+                );
+            } else {
+                b32 IsAfter = (TimeUSecs > CursorUSecs);
+                u64 Offset = IsAfter
+                    ? TimeUSecs - CursorUSecs
+                    : CursorUSecs - TimeUSecs;
+                char* Fmt = (char*) (IsAfter ? "+%S" : "-%S");
+
+                String = ArenaPushStrFmt(
+                    Scratch.MemPool,
+                    Fmt,
+                    PRINT_STR(
+                        FLAPGraphStrFromTime(
+                            Scratch.MemPool,
+                            NULL,
+                            Offset,
+                            Digits,
+                            FALSE
+                        )
+                    )
+                );
+            }
 
             FLAPGraphText(
                 Box,
@@ -2043,6 +2238,11 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
         State->HotKey == Params->Key
     );
     b32 HasCursor = State->HasCursor;
+    FLAPGraphClock const* Clock = (
+        Params->TimeKind == FLAP_GRAPH_TIME_KIND_LOCAL
+    )
+        ? Params->Clock
+        : NULL;
 
     if (!Metrics.ColumnsPerUnit)
         Metrics = FLAPGraphMetricsFromFontSize(UIHeadFontSize());
@@ -2085,6 +2285,10 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
     Data->CursorColour = UIColourFromName("selection"_s8);
     Data->HasCursor = State->HasCursor;
     Data->CursorTimeUSecs = State->CursorTimeUSecs;
+    Data->Clock = Clock;
+    Data->IsTimeFromCursor = !!(
+        Params->Settings & (1 << FLAP_GRAPH_SETTING_KIND_TIME_FROM_CURSOR)
+    );
 
     // NOTE(nc): the flags and the modes each have a toggle for the graph
     //         : and one for the minimap. what both are off for is not
@@ -2215,11 +2419,12 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
     if (HasCursor) {
         FLAPGraphDrawLabel* Label = &Data->Labels[Data->LabelsCount++];
 
-        Label->String = ArenaPushStrFmt(
+        Label->String = FLAPGraphStrFromTime(
             UIBuildMemPool(),
-            "%llu.%03llus",
-            State->CursorTimeUSecs / MILLION(1),
-            (State->CursorTimeUSecs % MILLION(1)) / THOUSAND(1)
+            Clock,
+            State->CursorTimeUSecs,
+            3,
+            TRUE
         );
         Label->Colour = Data->LabelColour;
     }
@@ -2558,19 +2763,18 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
 
                 UITooltip() {
                     UIPreferredWidth(UI_TEXT_DIM(10.0f, 1.0f)) {
-                        if (IsSnapped) {
-                            UILabel(
-                                "%llu.%06llus###hover_time",
-                                HoverUSecs / MILLION(1),
-                                HoverUSecs % MILLION(1)
-                            );
-                        } else {
-                            UILabel(
-                                "%llu.%03llus###hover_time",
-                                HoverUSecs / MILLION(1),
-                                (HoverUSecs % MILLION(1)) / THOUSAND(1)
-                            );
-                        }
+                        UILabel(
+                            "%S###hover_time",
+                            PRINT_STR(
+                                FLAPGraphStrFromTime(
+                                    UIBuildMemPool(),
+                                    Clock,
+                                    HoverUSecs,
+                                    IsSnapped ? 6 : 3,
+                                    TRUE
+                                )
+                            )
+                        );
 
                         // NOTE(nc): the mode at the time of the cursor is
                         //         : the last record that is not after it

@@ -463,7 +463,9 @@ enum : u32 {
     APP_CELL_KIND_CODE_CONTENTS         = (1 << 11),                            // WARN(nathan): to be removed / replaced
     APP_CELL_KIND_BORDER                = (1 << 12),
     APP_CELL_KIND_NO_BACKGROUND         = (1 << 13),
-    APP_CELL_KIND_BTN                   = (1 << 14)
+    APP_CELL_KIND_BTN                   = (1 << 14),
+    APP_CELL_KIND_DROPDOWN              = (1 << 15),
+    APP_CELL_KIND_PREVIEW_ON_HOVER      = (1 << 16)
 };
 
 enum AppWatchCellKind {
@@ -909,6 +911,9 @@ struct AppCellParams {
     b32*         Expanded;
     b32*         Toggled;
     f32*         SliderValue;
+    i64*         DropdownIndex;
+    Str8Array    DropdownOptions;
+    i64*         DropdownHovered;
     Str8         BindingsName;
     b32*         Revert;
     TextPoint*   Cursor;
@@ -1181,6 +1186,8 @@ FancyStrList AppTitleFStrFromCodeName(Arena* MemPool, Str8 CodeName);
 FancyStrList AppTitleFStrFromFilePath(Arena* MemPool, Str8 FilePath, b32 IncludeFolder);
 Str8 AppConfigNameFromCollectionName(Str8 Name);
 Str8 AppFilePathFromConfig(ConfigNode* Config);
+Str8Array AppThemeNames(Arena* MemPool);
+UISignal AppDropDown(i64* SelectedIndex, Str8Array Options, i64* HoveredIndex, Str8 String);
 
 APP_VIEW_UI_FUNC_DEF(Explorer);
 APP_VIEW_UI_FUNC_DEF(FLVView);

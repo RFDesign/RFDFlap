@@ -157,3 +157,19 @@ TimeDateTimeToWallClock(DateTime* DTime)
 
     return Result;
 }
+
+// NOTE(nc): the offset of the local time from UTC, at a time in seconds
+//         : from 1970. the daylight saving is the one of that date, and not
+//         : the one of today.
+i64
+TimeLocalOffsetSecs(u64 UnixSecs)
+{
+    i64 Result = 0;
+    time_t Seconds = (time_t) UnixSecs;
+    tm TM = {};
+
+    if (localtime_r(&Seconds, &TM))
+        Result = (i64) TM.tm_gmtoff;
+
+    return Result;
+}

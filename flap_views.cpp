@@ -406,6 +406,8 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                 Program->EmitCount
             );
             Params.Hold = &State->GraphHolds[NodeIndex];
+            Params.Clock = &State->GraphClock;
+            Params.TimeKind = Ctx->GraphTimeKind;
             Params.MinimapSource = Ctx->MinimapSource;
             Params.AnalysisIndex = Node->AnalysisIndex;
             Params.MemPool = AppViewMemPool();
@@ -792,6 +794,53 @@ FLAPGraphCaptureExport(
     }
 }
 
+INTERNAL u64
+FLAPRawU64At(FLVColumn const* Column, u64 Index)
+{
+    f64 Value = FLVColumnF64At(Column, Index);
+    u64 Result = 0;
+
+    if (Value == Value && Value > 0.0 && Column->Scale != 0.0)
+        Result = (u64) (Value / Column->Scale + 0.5);
+
+    return Result;
+}
+
+// NOTE(nc): the wall clock of the flight is in the file info of its FLI.
+//         : the offset of the local time is asked for one time for each
+//         : flight, so a graph only adds a number to a time.
+INTERNAL void
+FLAPGraphClockResolve(FLAPViewTabCtx* Ctx)
+{
+    FLAPGraphClock* Clock = &Ctx->State->GraphClock;
+    FLIKey Flight = Ctx->Keys[Ctx->Flight];
+
+    if (Clock->IsResolved && Clock->Flight == Flight)
+        return;
+
+    u64 InfoCount = 0;
+    FLIFileInfo* Infos = FLITableFromName(
+        Ctx->FLI,
+        FileInfo,
+        FILE_INFO,
+        &InfoCount
+    );
+
+    Clock->Flight = Flight;
+    Clock->IsResolved = TRUE;
+    Clock->Has = FALSE;
+
+    if (InfoCount && Infos[InfoCount - 1].StartUnixUSecs) {
+        u64 StartUSecs = Infos[InfoCount - 1].StartUnixUSecs;
+        i64 OffsetSecs = TimeLocalOffsetSecs(StartUSecs / MILLION(1));
+
+        Clock->LocalStartUSecs = (u64) (
+            (i64) StartUSecs + OffsetSecs * (i64) MILLION(1)
+        );
+        Clock->Has = TRUE;
+    }
+}
+
 // NOTE(nc): one bit for each setting of the table. the view reads it one
 //         : time in a frame, for all its graphs.
 INTERNAL u32
@@ -931,6 +980,42 @@ APP_VIEW_UI_FUNC_DEF(FLVView)
             Ctx.State = State;
             Ctx.View = View;
             Ctx.GraphSettings = FLAPGraphSettingsFromView();
+
+            // NOTE(nc): when the time from the cursor is turned on, the
+            //         : time is set to the local time. the first frame of
+            //         : a view has no settings before it, so a view that
+            //         : is loaded with it on keeps its time.
+            u32 CursorBit = (1 << FLAP_GRAPH_SETTING_KIND_TIME_FROM_CURSOR);
+
+            if (
+                State->HasPrevGraphSettings &&
+                (Ctx.GraphSettings & CursorBit) &&
+                !(State->PrevGraphSettings & CursorBit)
+            ) {
+                ConfigNode* TimeMode = ConfigNodeChildFromStrOrAlloc(
+                    APP_STATE->Config,
+                    View,
+                    "time_mode"_s8
+                );
+
+                ConfigNodeNewReplace(
+                    APP_STATE->Config,
+                    TimeMode,
+                    "%u",
+                    FLAP_GRAPH_TIME_KIND_LOCAL
+                );
+            }
+
+            State->PrevGraphSettings = Ctx.GraphSettings;
+            State->HasPrevGraphSettings = TRUE;
+            Ctx.GraphTimeKind = (FLAPGraphTimeKind) AppViewSettingFromNameU64(
+                "time_mode"_s8
+            );
+
+            // NOTE(nc): the wall clock of the flight is looked up only
+            //         : when the time is the local time.
+            if (Ctx.GraphTimeKind == FLAP_GRAPH_TIME_KIND_LOCAL)
+                FLAPGraphClockResolve(&Ctx);
 
             // NOTE(nc): what a minimap texture is made from, apart from
             //         : its graph: the flights, the path of the view and

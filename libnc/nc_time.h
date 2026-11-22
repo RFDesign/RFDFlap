@@ -69,5 +69,6 @@ f64 TimeElapsedUSec(PerfCounter Start, PerfCounter End);
 WallClockTime TimeGetWallClockUTC(void);
 void TimeWallClockToDateTime(WallClockTime Time, OUT DateTime* DTime);
 WallClockTime TimeDateTimeToWallClock(DateTime* DTime);
+i64 TimeLocalOffsetSecs(u64 UnixSecs);
 
 #endif // __NC_TIME_H__

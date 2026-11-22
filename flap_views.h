@@ -42,7 +42,10 @@ struct FLAPViewTabState {
     FLAPExportKind    TableExportKind;
     b32               IsTableExportWaiting;
     FLAPGraphHold     GraphHolds[FLV_LAYOUT_MAX];
+    FLAPGraphClock    GraphClock;
     b32               IsFitRequested;
+    u32               PrevGraphSettings;
+    b32               HasPrevGraphSettings;
     u32               __Padding;
 };
 
@@ -55,6 +58,8 @@ struct FLAPViewTabCtx {
     Str8              MinimapSource;
     u32               Flight;
     u32               GraphSettings;
+    FLAPGraphTimeKind GraphTimeKind;
+    u32               __Padding;
     FLIParsed*        FLI;
     FLAPViewTabState* State;
 };

@@ -3366,6 +3366,7 @@ DLL_IMPORT                    BOOL                              WinHttpReadData(
 DLL_IMPORT                    BOOL                              WinHttpCloseHandle(HINTERNET hInternet);
 DLL_IMPORT                    MMRESULT                     WINAPI  timeBeginPeriod(UINT uPeriod);
 DLL_IMPORT                    MMRESULT                     WINAPI  timeEndPeriod(UINT uPeriod);
+DLL_IMPORT                    BOOL                         WINAPI  SystemTimeToTzSpecificLocalTime(LPCVOID lpTimeZoneInformation, SYSTEMTIME const* lpUniversalTime, LPSYSTEMTIME lpLocalTime);
 EXTERN_C_LINK_END
 
 // @runtime____________________________________________________________________

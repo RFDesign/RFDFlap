@@ -425,6 +425,19 @@ B2FFormatFromFMTBody(Arena* MemPool, B2FFormat* Formats, u8* Body)
     Format->TimeField = B2FFieldIndexFromName(Format, "TimeUS"_s8);
     Format->HasTime = (Format->TimeField < Format->FieldCount);
 
+    // NOTE(nc): the GPS records have the wall clock of the log: the week
+    //         : and the milliseconds of the week.
+    if (StrMatch(Format->Name, "GPS"_s8, 0)) {
+        Format->WeekField = B2FFieldIndexFromName(Format, "GWk"_s8);
+        Format->MSecsField = B2FFieldIndexFromName(Format, "GMS"_s8);
+        Format->StatusField = B2FFieldIndexFromName(Format, "Status"_s8);
+        Format->HasClock = (
+            Format->HasTime &&
+            Format->WeekField < Format->FieldCount &&
+            Format->MSecsField < Format->FieldCount
+        );
+    }
+
     if (StrMatch(Format->Name, "FMT"_s8, 0))
         Format->Special = B2F_SPECIAL_KIND_FMT;
     else if (StrMatch(Format->Name, "FMTU"_s8, 0))
@@ -519,6 +532,8 @@ B2FConvert(Arena* MemPool, B2FConvertParams* Params)
             u64 SkippedRecordCount = 0;
             u64 MinTimeUSecs = U64_MAX;
             u64 MaxTimeUSecs = 0;
+            u64 ClockUnixUSecs = 0;
+            u64 ClockTimeUSecs = 0;
 
             for (u32 Index = 0; Index < BIN_TYPE_COUNT; ++Index)
                 MultValues[Index] = 1.0;
@@ -565,6 +580,40 @@ B2FConvert(Arena* MemPool, B2FConvertParams* Params)
                     TimeUSecs = B2FU64FromField(Body, Format, Format->TimeField);
                     MinTimeUSecs = MIN(MinTimeUSecs, TimeUSecs);
                     MaxTimeUSecs = MAX(MaxTimeUSecs, TimeUSecs);
+                }
+
+                // NOTE(nc): the first GPS record with a fix is the clock
+                //         : of the log. a status of 3 is a 3D fix, and a
+                //         : log with no status takes the first week that
+                //         : is not zero. GPS time is ahead of UTC by the
+                //         : leap seconds.
+                if (Format->HasClock && !ClockUnixUSecs) {
+                    u64 Week = B2FU64FromField(
+                        Body,
+                        Format,
+                        Format->WeekField
+                    );
+                    b32 HasFix = (
+                        Format->StatusField >= Format->FieldCount ||
+                        B2FU64FromField(
+                            Body,
+                            Format,
+                            Format->StatusField
+                        ) >= 3
+                    );
+
+                    if (Week && HasFix) {
+                        ClockUnixUSecs = (
+                            BIN_GPS_EPOCH_UNIX_SECS +
+                            Week * BIN_GPS_WEEK_SECS -
+                            BIN_GPS_LEAP_SECS
+                        ) * MILLION(1) + B2FU64FromField(
+                            Body,
+                            Format,
+                            Format->MSecsField
+                        ) * THOUSAND(1);
+                        ClockTimeUSecs = TimeUSecs;
+                    }
                 }
 
                 switch (Format->Special) {
@@ -798,6 +847,14 @@ B2FConvert(Arena* MemPool, B2FConvertParams* Params)
             Result->FileInfo.EndTimeUSecs = MaxTimeUSecs;
             Result->FileInfo.RecordCount = RecordCount;
             Result->FileInfo.SkippedRecordCount = SkippedRecordCount;
+
+            // NOTE(nc): the times of the FLI are from the first record, so
+            //         : the clock is moved back to it.
+            if (ClockUnixUSecs) {
+                Result->FileInfo.StartUnixUSecs = (
+                    ClockUnixUSecs - (ClockTimeUSecs - MinTimeUSecs)
+                );
+            }
 
             for (
                 FLIBakeParamChunkNode* Node = Result->Params.Head; 

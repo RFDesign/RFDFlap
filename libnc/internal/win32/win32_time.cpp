@@ -98,6 +98,37 @@ TimeDateTimeToWallClock(DateTime* DTime)
     return 0;
 }
 
+// NOTE(nc): the offset of the local time from UTC, at a time in seconds
+//         : from 1970. the daylight saving is the one of that date, and not
+//         : the one of today. a FILETIME is in steps of 100 ns from 1601.
+i64
+TimeLocalOffsetSecs(u64 UnixSecs)
+{
+    i64 Result = 0;
+    u64 Ticks = (UnixSecs + 11644473600ULL) * 10000000ULL;
+    FILETIME FTime;
+    FILETIME LocalFTime;
+    SYSTEMTIME STime;
+    SYSTEMTIME LocalSTime;
+
+    FTime.dwLowDateTime = (u32) (Ticks & U32_MAX);
+    FTime.dwHighDateTime = (u32) (Ticks >> 32);
+
+    if (
+        FileTimeToSystemTime(&FTime, &STime) &&
+        SystemTimeToTzSpecificLocalTime(NULL, &STime, &LocalSTime) &&
+        SystemTimeToFileTime(&LocalSTime, &LocalFTime)
+    ) {
+        u64 LocalTicks = (
+            ((u64) LocalFTime.dwHighDateTime << 32) | LocalFTime.dwLowDateTime
+        );
+
+        Result = ((i64) LocalTicks - (i64) Ticks) / 10000000LL;
+    }
+
+    return Result;
+}
+
 void
 SleepMSecs(u32 MSecs)
 {

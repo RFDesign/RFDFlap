@@ -5164,6 +5164,7 @@ FLIBake(Arena* MemPool, FLIBakeParams* Params)
             Dst->EndTimeUSecs = Src->EndTimeUSecs;
             Dst->RecordCount = Src->RecordCount;
             Dst->SkippedRecordCount = Src->SkippedRecordCount;
+            Dst->StartUnixUSecs = Src->StartUnixUSecs;
             FLI_BAKE_SHARED->BakedFileInfo.FileInfo = Dst;
             FLI_BAKE_SHARED->BakedFileInfo.FileInfoCount = 1;
         }

@@ -2373,7 +2373,10 @@ UIBeginContextMenu(UIKey Key)
 
             UI_STATE->ContextMenuRoot->TextColour = UIColourFromName("text"_s8);
             UI_STATE->ContextMenuRoot->BackgroundColour = UIColourFromName("background"_s8);
-            UISpacer(UI_EM(1.0f, 1.0f));
+
+            UIPreferredWidth(UI_PX(0.0f, 1.0f)) {
+                UISpacer(UI_EM(1.0f, 1.0f));
+            }
         }
     }
 
@@ -2389,7 +2392,10 @@ UIEndContextMenu(void)
 
     if (UI_STATE->IsInOpenContextMenu) {
         UI_STATE->IsInOpenContextMenu = FALSE;
-        UISpacer(UI_EM(1.0f, 1.0f));
+
+        UIPreferredWidth(UI_PX(0.0f, 1.0f)) {
+            UISpacer(UI_EM(1.0f, 1.0f));
+        }
     }
 
     UIPopTransparency();

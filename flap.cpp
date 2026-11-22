@@ -2348,6 +2348,52 @@ AppViewUI(r2f32 Rect)
                                                                     }
 
                                                                     f32 NextCellSliderValue = CellSliderValue;
+
+                                                                    // NOTE(nc): a setting with a list of options is a drop down. its
+                                                                    //         : value is the index of the option, and the names of
+                                                                    //         : the options are in its schema.
+                                                                    Str8Array CellOptions = {};
+                                                                    i64 CellOption = (i64) CellValueEval.Value.U64;
+                                                                    i64 NextCellOption = CellOption;
+                                                                    i64 CellOptionHovered = -1;
+                                                                    b32 CellIsTheme = FALSE;
+                                                                    ConfigNode* CellThemeCfg = EMPTY_CFG_NODE_VALUE;
+
+
+                                                                    if (
+                                                                        CellType->Kind == EVAL_TYPE_KIND_LENS &&
+                                                                        StrMatch(CellType->Name, "options"_s8, 0) &&
+                                                                        Cell->Eval.Space.Kind == APP_EVAL_SPACE_KIND_META_CFG
+                                                                    ) {
+                                                                        ConfigNode* Cfg = AppConfigFromEvalSpace(Cell->Eval.Space);
+                                                                        Str8 ChildKey = EvalStrFromID(Cell->Eval.Space.U64s[1]);
+                                                                        MDNodePtrList Schemas = ConfigSchemasFromName(
+                                                                            Scratch.MemPool,
+                                                                            APP_STATE->CfgSchemaTable,
+                                                                            Cfg->String
+                                                                        );
+                                                                        MDNode* Options = EMPTY_MD_NODE_VALUE;
+                                                                        Str8List Names = {};
+
+                                                                        for (
+                                                                            MDNodePtrNode* N = Schemas.Head;
+                                                                            MDNodeIsEmpty(Options) && N;
+                                                                            N = N->Next
+                                                                        ) {
+                                                                            Options = MDTagFromStr(
+                                                                                MDChildFromStr(N->V, ChildKey, 0)->Head,
+                                                                                "options"_s8,
+                                                                                0
+                                                                            );
+                                                                        }
+
+                                                                        for EACH_MDNODE(Option, Options->Head) {
+                                                                            ListPush(Scratch.MemPool, &Names, Option->String);
+                                                                        }
+
+                                                                        CellOptions = StrArrayFromList(Scratch.MemPool, &Names);
+                                                                    }
+
                                                                     v4f32 CellBackgroundColourOverride = {};
 
                                                                     {
@@ -2706,6 +2752,53 @@ AppViewUI(r2f32 Rect)
                                                                                                     CellParams.SliderValue = &NextCellSliderValue;
                                                                                                 }
 
+                                                                                                // NOTE(nc): the theme is a name, not an index, so its options are the theme
+                                                                                                //         : names and the selected option is found by name. while an entry
+                                                                                                //         : is being previewed the set name is the second child.
+                                                                                                if (
+                                                                                                    CellHasFancyEditors &&
+                                                                                                    !CellOptions.Count &&
+                                                                                                    Cell->Eval.Space.Kind == APP_EVAL_SPACE_KIND_META_CFG &&
+                                                                                                    StrMatch(EvalStrFromID(Cell->Eval.Space.U64s[1]), "theme"_s8, 0)
+                                                                                                ) {
+                                                                                                    CellThemeCfg = AppConfigFromEvalSpace(Cell->Eval.Space);
+
+                                                                                                    ConfigNode* Theme = ConfigNodeChildFromStr(CellThemeCfg, "theme"_s8);
+                                                                                                    Str8 ThemeName = "Ayu Dark"_s8;
+
+                                                                                                    if (Theme != EMPTY_CFG_NODE_VALUE && Theme->Head != EMPTY_CFG_NODE_VALUE) {
+                                                                                                        ConfigNode* Set = (Theme->Head->Next != EMPTY_CFG_NODE_VALUE)
+                                                                                                            ? Theme->Head->Next
+                                                                                                            : Theme->Head;
+
+                                                                                                        ThemeName = Set->String;
+                                                                                                    }
+
+                                                                                                    CellOptions = AppThemeNames(Scratch.MemPool);
+                                                                                                    CellOption = -1;
+
+                                                                                                    for (u64 I = 0; I < CellOptions.Count; ++I) {
+                                                                                                        if (StrMatch(CellOptions.Data[I], ThemeName, 0)) {
+                                                                                                            CellOption = (i64) I;
+                                                                                                            break;
+                                                                                                        }
+                                                                                                    }
+
+                                                                                                    NextCellOption = CellOption;
+                                                                                                    CellIsTheme = TRUE;
+                                                                                                }
+
+                                                                                                if (CellHasFancyEditors && CellOptions.Count) {
+                                                                                                    CellParams.Kind |= APP_CELL_KIND_DROPDOWN;
+                                                                                                    CellParams.DropdownIndex = &NextCellOption;
+                                                                                                    CellParams.DropdownOptions = CellOptions;
+
+                                                                                                    if (CellIsTheme) {
+                                                                                                        CellParams.Kind |= APP_CELL_KIND_PREVIEW_ON_HOVER;
+                                                                                                        CellParams.DropdownHovered = &CellOptionHovered;
+                                                                                                    }
+                                                                                                }
+
                                                                                                 if (
                                                                                                     Cell->PX == 0.0f &&
                                                                                                     Cell->Eval.Space.Kind == APP_EVAL_SPACE_KIND_META_CMD
@@ -3059,6 +3152,47 @@ AppViewUI(r2f32 Rect)
                                                                         }
 
                                                                         AppCommitEvalValueStr(Cell->Eval, NewValueString);
+                                                                    }
+
+                                                                    if (CellIsTheme) {
+                                                                        ConfigNode* Theme = ConfigNodeChildFromStr(CellThemeCfg, "theme"_s8);
+                                                                        b32 IsPreviewing = (
+                                                                            Theme != EMPTY_CFG_NODE_VALUE &&
+                                                                            Theme->Head != EMPTY_CFG_NODE_VALUE &&
+                                                                            Theme->Head->Next != EMPTY_CFG_NODE_VALUE
+                                                                        );
+
+                                                                        if (NextCellOption != CellOption) {
+                                                                            // NOTE(nc): the replace drops the kept name, so the choice stays.
+                                                                            ConfigNodeNewReplace(
+                                                                                APP_STATE->Config,
+                                                                                ConfigNodeChildFromStrOrAlloc(APP_STATE->Config, CellThemeCfg, "theme"_s8),
+                                                                                CellOptions.Data[NextCellOption]
+                                                                            );
+                                                                            AppRequestFrame();
+                                                                        } else if (CellOptionHovered >= 0) {
+                                                                            Str8 Hovered = CellOptions.Data[CellOptionHovered];
+
+                                                                            if (!IsPreviewing) {
+                                                                                Str8 Kept = (CellOption >= 0) ? CellOptions.Data[CellOption] : "Ayu Dark"_s8;
+
+                                                                                Theme = ConfigNodeChildFromStrOrAlloc(APP_STATE->Config, CellThemeCfg, "theme"_s8);
+                                                                                ConfigNodeNewReplace(APP_STATE->Config, Theme, Hovered);
+                                                                                ConfigNodeNew(APP_STATE->Config, Theme, Kept);
+                                                                                AppRequestFrame();
+                                                                            } else if (!StrMatch(Theme->Head->String, Hovered, 0)) {
+                                                                                ConfigNodeEquipStr(APP_STATE->Config, Theme->Head, Hovered);
+                                                                                AppRequestFrame();
+                                                                            }
+                                                                        } else if (IsPreviewing) {
+                                                                            ConfigNodeNewReplace(APP_STATE->Config, Theme, Theme->Head->Next->String);
+                                                                            AppRequestFrame();
+                                                                        }
+                                                                    } else if (NextCellOption != CellOption) {
+                                                                        AppCommitEvalValueStr(
+                                                                            Cell->Eval,
+                                                                            ArenaPushStrFmt(Scratch.MemPool, "%lld", NextCellOption)
+                                                                        );
                                                                     }
 
                                                                     CellXPX = NextCellXPX;

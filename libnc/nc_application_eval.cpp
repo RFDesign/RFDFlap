@@ -628,6 +628,25 @@ EVAL_TYPE_ACCESS_FUNC_DEF(Schema)
                 }
             }
 
+            // NOTE(nc): a setting that is one of a list of options. its
+            //         : value is the index of the option, and the cell of
+            //         : the setting reads the names from the schema.
+            {
+                MDNode* Options = MDTagFromStr(
+                    ChildSchema->Head, 
+                    "options"_s8, 
+                    0
+                );
+
+                if (!MDNodeIsEmpty(Options)) {
+                    ChildTypeKey = EvalTypeKeyConstruct(
+                        __Params.Kind = EVAL_TYPE_KIND_LENS,
+                        __Params.Name = "options"_s8,
+                        __Params.DirectKey = ChildTypeKey
+                    );
+                }
+            }
+
             EvalSpace ChildEvalSpace = {};
 
             if (Cfg != EMPTY_CFG_NODE_VALUE) {
