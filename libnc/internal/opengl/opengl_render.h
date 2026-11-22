@@ -1,10 +1,17 @@
 #if !defined(__OPENGL_RENDER_H__)
 #define __OPENGL_RENDER_H__
 
+#include "../../nc_types.h"
+#include "opengl_platform.h"
+
 // @defines____________________________________________________________________
 enum OGLShaderKind {
     SHADER_KIND_RECT,
     SHADER_KIND_BLUR,
+    SHADER_KIND_CAD_LINE,
+    SHADER_KIND_CAD_ARC,
+    SHADER_KIND_CAD_TRIANGLE,
+    SHADER_KIND_CAD_RIBBON,
     SHADER_KIND_COUNT
 };
 
@@ -56,6 +63,9 @@ enum OGLShaderKind {
     X(glDebugMessageCallback, void, (void (*)(GLenum Source, GLenum Type, GLuint ID, GLenum Severity, GLsizei Length, GLchar const* Message, void const* UserParam), void* UserData))                 \
     X(glFramebufferTexture2D, void, (GLenum Target, GLenum Attachment, GLenum TexTarget, GLuint Texture, GLint Level))                                                                                \
     X(glBlitFramebuffer, void, (GLint SrcX0, GLint SrcY0, GLint SrcX1, GLint SrcY1, GLint DstX0, GLint DstY0, GLint DstX1, GLint DstY1, GLbitfield Mask, GLenum filter))                              \
+    X(glMapBufferRange, void*, (GLenum Target, GLintptr Offset, GLsizeiptr Length, GLbitfield Access))                                                                                                \
+    X(glUnmapBuffer, GLboolean, (GLenum Target))                                                                                                                                                      \
+
 
 #define X(Y, Z, W) typedef Z Y##FuncType W;
 OGL_PROC_XLIST
@@ -88,10 +98,13 @@ struct OGLFormatInfo {
 
 struct OGLTex2D {
     OGLTex2D*        Next;
+    OGLTex2D*        UploadNext;
+    void*            UploadData;
     GLuint           ID;
     RendResourceKind ResourceKind;
     RendTex2DFmt     Format;
     v2i32            Size;
+    b32              IsUploadPending;
 };
 
 struct OGLFlushBuffer {
@@ -110,16 +123,26 @@ struct OGLWindow {
     v2f32           PrevClientRectLength;
     OGLRenderTarget StageTarget;
     OGLRenderTarget StageScratchTarget;
+    GLuint          CapturePBO;
+    r2i32           CaptureRect;
+    b32             IsCapturePending;
 };
 
 struct OGLState {
     Arena*          MemPool;
     OGLWindow*      FreeWindow;
     OGLTex2D*       FreeTex2D;
+    OGLTex2D*       ToFreeTex2D;
+    OGLTex2D*       HeadUploadTex2D;
+    OGLTex2D*       TailUploadTex2D;
+    Arena*          UploadMemPool;
+    Handle          Tex2DMtx;
     GLuint          Shaders[SHADER_KIND_COUNT];
     GLuint          AllPurposeVAO;
     GLuint          ScratchBuffer64KB;
     GLuint          WhiteTexture;
+    GLuint          InstanceBuffer;
+    u64             InstanceBufferSize;
     Arena*          BufferFlushMemPool;
     OGLFlushBuffer* HeadBufferToFlush;
     OGLFlushBuffer* TailBufferToFlush;
@@ -131,11 +154,11 @@ OGL_PROC_XLIST
 #undef X
 
 EXTERN_C_LINK_BEGIN
-extern Str8 OGL_SHADER_KIND_NAME_TABLE[2];
-extern Str8* OGL_SHADER_KIND_VSHADER_SRC_TABLE[2];
-extern Str8* OGL_SHADER_KIND_PSHADER_SRC_TABLE[2];
-extern OGLAttributeArray OGL_SHADER_KIND_INPUT_ATTRIBUTES_TABLE[2];
-extern OGLAttributeArray OGL_SHADER_KIND_OUTPUT_ATTRIBUTES_TABLE[2];
+extern Str8 OGL_SHADER_KIND_NAME_TABLE[SHADER_KIND_COUNT];
+extern Str8* OGL_SHADER_KIND_VSHADER_SRC_TABLE[SHADER_KIND_COUNT];
+extern Str8* OGL_SHADER_KIND_PSHADER_SRC_TABLE[SHADER_KIND_COUNT];
+extern OGLAttributeArray OGL_SHADER_KIND_INPUT_ATTRIBUTES_TABLE[SHADER_KIND_COUNT];
+extern OGLAttributeArray OGL_SHADER_KIND_OUTPUT_ATTRIBUTES_TABLE[SHADER_KIND_COUNT];
 EXTERN_C_LINK_END
 
 extern OGLState* OGL_STATE;
@@ -147,11 +170,12 @@ extern RendHandle OGLEquipWindow(Handle WindowHandle);
 extern void OGLUnequipWindow(Handle WindowHandle, RendHandle Renderer);
 extern void OGLSelectWindow(Handle WindowHandle, RendHandle Renderer);
 extern void OGLSwapWindow(Handle WindowHandle, RendHandle Renderer);
+extern b32 OGLIsContextCurrent(void);
 
 RendHandle RendHandleFromTex2D(OGLTex2D* Tex);
 OGLTex2D* RendTex2DFromHandle(RendHandle Handle);
 OGLFormatInfo OGLFormatInfoFromTex2DFmt(RendTex2DFmt Format);
-GLuint OGLInstanceBufferFromSize(u64 Size);
+void OGLInstanceBufferBind(u64 Size);
 void OGLDebugMessageFunc(GLenum Source, GLenum Tupe, GLuint ID, GLenum Severity, GLsizei Length, GLchar const* Message, void const* UserParam);
 
 #endif // __OPENGL_RENDER_H__

@@ -1,6 +1,8 @@
 #if !defined(__OPENGL_PLATFORM_H__)
 #define __OPENGL_PLATFORM_H__
 
+#include "../../nc_types.h"
+
 // @defines____________________________________________________________________
 typedef char GLchar;
 typedef dptr GLsizeiptr;
@@ -60,7 +62,9 @@ typedef dptr GLintptr;
 #define GL_TEXTURE31                      0x84DF
 #define GL_DEBUG_OUTPUT                   0x92E0
 #define GL_DEBUG_OUTPUT_SYNCHRONOUS       0x8242
-
+#define GL_PIXEL_PACK_BUFFER              0x88EB
+#define GL_MAP_READ_BIT                   0x0001
+#define GL_RGBA16F                        0x881A
 
 // @types______________________________________________________________________
 

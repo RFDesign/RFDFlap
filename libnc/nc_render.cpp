@@ -2,6 +2,7 @@
 #include "nc_string.h"
 #include "nc_arena.h"
 
+
 EXTERN_C_LINK_BEGIN
 Str8 TEX2D_FMT_DISP_STRINGS[TEX2D_FMT_COUNT] = {
     Str8Lit("R8"),

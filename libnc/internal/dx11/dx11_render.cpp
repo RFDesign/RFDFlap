@@ -944,56 +944,75 @@ DX11BufferFromSize(u64 Size)
     ID3D11Buffer* Result = DX11_STATE->InstanceScratchBuffer64KB;
 
     if (Size > KB(64)) {
-        u64 FlushedBufferSize = Size;
+        // NOTE(nc): one buffer for all the lists above 64KB. it grows to
+        //         : the largest list and stays. each use maps it with a
+        //         : discard, as the scratch buffer, so it can be in more
+        //         : than one draw of a frame.
+        if (Size > DX11_STATE->InstanceBufferSize) {
+            u64 NewSize = Size;
 
-        FlushedBufferSize += MB(1) - 1;
-        FlushedBufferSize -= FlushedBufferSize % MB(1);
+            NewSize += MB(1) - 1;
+            NewSize -= NewSize % MB(1);
 
-        D3D11_BUFFER_DESC Description = {};
+            D3D11_BUFFER_DESC Description = {};
 
-        Description.ByteWidth = (UINT) FlushedBufferSize;
-        Description.Usage = D3D11_USAGE_DYNAMIC;
-        Description.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        Description.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            Description.ByteWidth = (UINT) NewSize;
+            Description.Usage = D3D11_USAGE_DYNAMIC;
+            Description.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            Description.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-        HRESULT HRes = DX11_STATE->Device->Vtbl->CreateBuffer(
-            DX11_STATE->Device,
-            &Description,
-            NULL,
-            &Result
-        );
-
-        if (FAILED(HRes)) {
-            LogPanic("unable to create Buffer of size %llu", Size);
-            GraphicalMessage(
-                TRUE, 
-                "Fatal Exception"_s8, 
-                "Unable to create Direct3D 11 Buffer"_s8
+            ID3D11Buffer* NewBuffer = NULL;
+            HRESULT HRes = DX11_STATE->Device->Vtbl->CreateBuffer(
+                DX11_STATE->Device,
+                &Description,
+                NULL,
+                &NewBuffer
             );
 
-            return NULL;
+            if (FAILED(HRes)) {
+                LogPanic("unable to create Buffer of size %llu", Size);
+                GraphicalMessage(
+                    TRUE, 
+                    "Fatal Exception"_s8, 
+                    "Unable to create Direct3D 11 Buffer"_s8
+                );
+
+                return NULL;
+            }
+
+            // NOTE(nc): a draw of this frame can still use the old
+            //         : buffer, so it is released at the end of the frame
+            if (DX11_STATE->InstanceBuffer) {
+                DX11FlushBuffer* Node = ArenaPushArrayZero(
+                    DX11_STATE->FlushBufferMemPool, 
+                    DX11FlushBuffer, 
+                    1
+                );
+
+                Node->Buffer = DX11_STATE->InstanceBuffer;
+                SLL_QUEUE_PUSH(
+                    DX11_STATE->HeadFlushBuffer, 
+                    DX11_STATE->TailFlushBuffer, 
+                    Node
+                );
+            }
+
+            DX11_STATE->InstanceBuffer = NewBuffer;
+            DX11_STATE->InstanceBufferSize = NewSize;
         }
 
-        DX11FlushBuffer* Node = ArenaPushArrayZero(
-            DX11_STATE->FlushBufferMemPool, 
-            DX11FlushBuffer, 
-            1
-        );
-
-        Node->Buffer = Result;
-        SLL_QUEUE_PUSH(
-            DX11_STATE->HeadFlushBuffer, 
-            DX11_STATE->TailFlushBuffer, 
-            Node
-        );
+        Result = DX11_STATE->InstanceBuffer;
     }
 
     return Result;
 }
 
 void 
-UsageAccessFlagsFromResourceKind(RendResourceKind Kind, OUT D3D11_USAGE* Usage, OUT UINT* CPUAccessFlags)
-{
+UsageAccessFlagsFromResourceKind(
+    RendResourceKind Kind, 
+    OUT D3D11_USAGE* Usage, 
+    OUT UINT* CPUAccessFlags
+) {
     switch (Kind) {
         default: {
             UNREACHABLE();
@@ -1014,6 +1033,145 @@ UsageAccessFlagsFromResourceKind(RendResourceKind Kind, OUT D3D11_USAGE* Usage, 
             *CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         } break;
     }
+}
+
+// NOTE(nc): the caller holds the lock of the state
+INTERNAL void
+DX11WindowGeo3DTargetsRelease(DX11Window* Wnd)
+{
+    if (Wnd->Geo3DColourSRV)
+        Wnd->Geo3DColourSRV->Vtbl->Release(Wnd->Geo3DColourSRV);
+
+    if (Wnd->Geo3DColourRTV)
+        Wnd->Geo3DColourRTV->Vtbl->Release(Wnd->Geo3DColourRTV);
+
+    if (Wnd->Geo3DColour)
+        Wnd->Geo3DColour->Vtbl->Release(Wnd->Geo3DColour);
+
+    if (Wnd->Geo3DDepthSRV)
+        Wnd->Geo3DDepthSRV->Vtbl->Release(Wnd->Geo3DDepthSRV);
+
+    if (Wnd->Geo3DDepthDSV)
+        Wnd->Geo3DDepthDSV->Vtbl->Release(Wnd->Geo3DDepthDSV);
+
+    if (Wnd->Geo3DDepth)
+        Wnd->Geo3DDepth->Vtbl->Release(Wnd->Geo3DDepth);
+
+    Wnd->Geo3DColourSRV = NULL;
+    Wnd->Geo3DColourRTV = NULL;
+    Wnd->Geo3DColour = NULL;
+    Wnd->Geo3DDepthSRV = NULL;
+    Wnd->Geo3DDepthDSV = NULL;
+    Wnd->Geo3DDepth = NULL;
+}
+
+// NOTE(nc): the targets of the Geo3D pass are the size of the window, so
+//         : they are made for the first Geo3D pass of the window and not
+//         : before. a resize releases them, and the next Geo3D pass makes
+//         : them again. the caller holds the lock of the state.
+INTERNAL void
+DX11WindowGeo3DTargetsAlloc(DX11Window* Wnd)
+{
+    if (Wnd->Geo3DColour)
+        return;
+
+    D3D11_TEXTURE2D_DESC ColourDesc = {};
+
+    {
+        Wnd->FrameBuffer->Vtbl->GetDesc(
+            Wnd->FrameBuffer,
+            &ColourDesc
+        );
+        ColourDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        ColourDesc.BindFlags = (
+            D3D11_BIND_RENDER_TARGET | 
+            D3D11_BIND_SHADER_RESOURCE
+        );
+    }
+
+    D3D11_RENDER_TARGET_VIEW_DESC ColourRTVDesc = {};
+
+    {
+        ColourRTVDesc.Format = ColourDesc.Format;
+        ColourRTVDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC ColourSRVDesc = {};
+
+    {
+        ColourSRVDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        ColourSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        ColourSRVDesc.Texture2D.MipLevels = -1;
+    }
+
+    D3D11_TEXTURE2D_DESC DepthDesc = {};
+
+    {
+        Wnd->FrameBuffer->Vtbl->GetDesc(
+            Wnd->FrameBuffer,
+            &DepthDesc
+        );
+        DepthDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
+        DepthDesc.BindFlags = (
+            D3D11_BIND_DEPTH_STENCIL |
+            D3D11_BIND_SHADER_RESOURCE
+        );
+    }
+
+    D3D11_DEPTH_STENCIL_VIEW_DESC DepthDSVDesc = {};
+
+    {
+        DepthDSVDesc.Flags = 0;
+        DepthDSVDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        DepthDSVDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        DepthDSVDesc.Texture2D.MipSlice = 0;
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC DepthSRVDesc = {};
+
+    {
+        DepthSRVDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        DepthSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        DepthSRVDesc.Texture2D.MostDetailedMip = 0;
+        DepthSRVDesc.Texture2D.MipLevels = -1;
+    }
+
+    DX11_STATE->Device->Vtbl->CreateTexture2D(
+        DX11_STATE->Device,
+        &ColourDesc,
+        NULL,
+        &Wnd->Geo3DColour
+    );
+    DX11_STATE->Device->Vtbl->CreateRenderTargetView(
+        DX11_STATE->Device,
+        Wnd->Geo3DColour,
+        &ColourRTVDesc,
+        &Wnd->Geo3DColourRTV
+    );
+    DX11_STATE->Device->Vtbl->CreateShaderResourceView(
+        DX11_STATE->Device,
+        Wnd->Geo3DColour,
+        &ColourSRVDesc,
+        &Wnd->Geo3DColourSRV
+    );
+    DX11_STATE->Device->Vtbl->CreateTexture2D(
+        DX11_STATE->Device,
+        &DepthDesc,
+        NULL,
+        &Wnd->Geo3DDepth
+    );
+    DX11_STATE->Device->Vtbl->CreateDepthStencilView(
+        DX11_STATE->Device,
+        Wnd->Geo3DDepth,
+        &DepthDSVDesc,
+        &Wnd->Geo3DDepthDSV
+    );
+    DX11_STATE->Device->Vtbl->CreateShaderResourceView(
+        DX11_STATE->Device,
+        Wnd->Geo3DDepth,
+        &DepthSRVDesc,
+        &Wnd->Geo3DDepthSRV
+    );
 }
 
 EXTERN_C_LINK_BEGIN
@@ -2162,42 +2320,7 @@ RendBeginWindowFrame(Handle WindowHandle, RendHandle Renderer)
                     );
                 }
 
-                if (Wnd->Geo3DColourSRV) {
-                    Wnd->Geo3DColourSRV->Vtbl->Release(
-                        Wnd->Geo3DColourSRV
-                    );
-                }
-
-                if (Wnd->Geo3DColourRTV) {
-                    Wnd->Geo3DColourRTV->Vtbl->Release(
-                        Wnd->Geo3DColourRTV
-                    );
-                }
-
-                if (Wnd->Geo3DColour) {
-                    Wnd->Geo3DColour->Vtbl->Release(
-                        Wnd->Geo3DColour
-                    );
-                }
-
-                if (Wnd->Geo3DDepthSRV) {
-                    Wnd->Geo3DDepthSRV->Vtbl->Release(
-                        Wnd->Geo3DDepthSRV
-                    );
-                }
-
-                if (Wnd->Geo3DDepthDSV) {
-                    Wnd->Geo3DDepthDSV->Vtbl->Release(
-                        Wnd->Geo3DDepthDSV
-                    );
-                }
-
-                if (Wnd->Geo3DDepth) {
-                    Wnd->Geo3DDepth->Vtbl->Release(
-                        Wnd->Geo3DDepth
-                    );
-                }
-
+                DX11WindowGeo3DTargetsRelease(Wnd);
                 Wnd->FrameBufferRTV->Vtbl->Release(
                     Wnd->FrameBufferRTV
                 );
@@ -2295,106 +2418,6 @@ RendBeginWindowFrame(Handle WindowHandle, RendHandle Renderer)
                         Wnd->StageScratchColour,
                         &SRVDesc,
                         &Wnd->StageScratchColourSRV
-                    );
-                }
-
-                {   // NOTE(nathan): geo 3D targets
-                    D3D11_TEXTURE2D_DESC ColourDesc = {};
-
-                    {
-                        Wnd->FrameBuffer->Vtbl->GetDesc(
-                            Wnd->FrameBuffer,
-                            &ColourDesc
-                        );
-                        ColourDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                        ColourDesc.BindFlags = (
-                            D3D11_BIND_RENDER_TARGET | 
-                            D3D11_BIND_SHADER_RESOURCE
-                        );
-                    }
-
-                    D3D11_RENDER_TARGET_VIEW_DESC ColourRTVDesc = {};
-
-                    {
-                        ColourRTVDesc.Format = ColourDesc.Format;
-                        ColourRTVDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-                    }
-
-                    D3D11_SHADER_RESOURCE_VIEW_DESC ColourSRVDesc = {};
-
-                    {
-                        ColourSRVDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                        ColourSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-                        ColourSRVDesc.Texture2D.MipLevels = -1;
-                    }
-
-                    D3D11_TEXTURE2D_DESC DepthDesc = {};
-
-                    {
-                        Wnd->FrameBuffer->Vtbl->GetDesc(
-                            Wnd->FrameBuffer,
-                            &DepthDesc
-                        );
-                        DepthDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
-                        DepthDesc.BindFlags = (
-                            D3D11_BIND_DEPTH_STENCIL |
-                            D3D11_BIND_SHADER_RESOURCE
-                        );
-                    }
-
-                    D3D11_DEPTH_STENCIL_VIEW_DESC DepthDSVDesc = {};
-
-                    {
-                        DepthDSVDesc.Flags = 0;
-                        DepthDSVDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-                        DepthDSVDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-                        DepthDSVDesc.Texture2D.MipSlice = 0;
-                    }
-
-                    D3D11_SHADER_RESOURCE_VIEW_DESC DepthSRVDesc = {};
-
-                    {
-                        DepthSRVDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-                        DepthSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-                        DepthSRVDesc.Texture2D.MostDetailedMip = 0;
-                        DepthSRVDesc.Texture2D.MipLevels = -1;
-                    }
-
-                    DX11_STATE->Device->Vtbl->CreateTexture2D(
-                        DX11_STATE->Device,
-                        &ColourDesc,
-                        NULL,
-                        &Wnd->Geo3DColour
-                    );
-                    DX11_STATE->Device->Vtbl->CreateRenderTargetView(
-                        DX11_STATE->Device,
-                        Wnd->Geo3DColour,
-                        &ColourRTVDesc,
-                        &Wnd->Geo3DColourRTV
-                    );
-                    DX11_STATE->Device->Vtbl->CreateShaderResourceView(
-                        DX11_STATE->Device,
-                        Wnd->Geo3DColour,
-                        &ColourSRVDesc,
-                        &Wnd->Geo3DColourSRV
-                    );
-                    DX11_STATE->Device->Vtbl->CreateTexture2D(
-                        DX11_STATE->Device,
-                        &DepthDesc,
-                        NULL,
-                        &Wnd->Geo3DDepth
-                    );
-                    DX11_STATE->Device->Vtbl->CreateDepthStencilView(
-                        DX11_STATE->Device,
-                        Wnd->Geo3DDepth,
-                        &DepthDSVDesc,
-                        &Wnd->Geo3DDepthDSV
-                    );
-                    DX11_STATE->Device->Vtbl->CreateShaderResourceView(
-                        DX11_STATE->Device,
-                        Wnd->Geo3DDepth,
-                        &DepthSRVDesc,
-                        &Wnd->Geo3DDepthSRV
                     );
                 }
             }
@@ -3190,6 +3213,9 @@ RendSubmitWindow(Handle WindowHandle, RendHandle Renderer, RendPassList* Passes)
                     case PASS_KIND_GEO3D: {
                         RendPassGeo3DParams* Params = Pass->Geo3DParams;
                         RendBatch3DMap* MeshMap = &Params->Batches;
+
+                        DX11WindowGeo3DTargetsAlloc(Wnd);
+
                         v2f32 ViewPortLength = Length(Params->ViewPort);
                         D3D11_VIEWPORT ViewPort = {
                             Params->ViewPort.X0,

@@ -148,6 +148,8 @@ struct DX11State {
     ID3D11DepthStencilState* NoOpDepthStencil;
     ID3D11DepthStencilState* PlainDepthStencil;
     ID3D11Buffer*            InstanceScratchBuffer64KB;
+    ID3D11Buffer*            InstanceBuffer;
+    u64                      InstanceBufferSize;
     RendHandle               BackupTexture;
     ID3D11VertexShader*      VertShaders[VERT_SHADER_COUNT];
     ID3D11InputLayout*       InputLayouts[VERT_SHADER_COUNT];

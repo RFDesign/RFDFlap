@@ -3415,11 +3415,10 @@ AppViewUI(r2f32 Rect)
 INTERNAL b32
 Frame(void)
 {
-    b32 Result = TRUE;
-
+    FontFrame();
     AppFrame();
 
-    return Result;
+    return APP_STATE->Quit;
 }
 
 ASYNC_THREAD_FUNC_SIG(EntryPoint)

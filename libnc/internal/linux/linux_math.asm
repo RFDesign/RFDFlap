@@ -475,8 +475,8 @@ global Round64NextPow2
 align 16
 Round64NextPow2:
     mov     rax, 64
-    dec     rcx
-    lzcnt   rcx, rcx
+    dec     rdi
+    lzcnt   rcx, rdi
     sub     rax, rcx
     mov     rcx, rax
     mov     rax, 1

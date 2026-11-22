@@ -2,6 +2,8 @@
 #include "../../nc_arena.h"
 #include "../../nc_log.h"
 #include "../../nc_window.h"
+#include "../../nc_sync.h"
+#include "../../nc_memory.h"
 
 #include "opengl_platform.h"
 #include "opengl_render.h"
@@ -17,6 +19,30 @@ global OGLAttribute OGL_RECT_INPUT_ATTRIBUTES[] = {
     {5, Str8Lit("c2v_colours_3"),    GL_FLOAT, 4},
     {6, Str8Lit("c2v_corner_radii"), GL_FLOAT, 4},
     {7, Str8Lit("c2v_style"),        GL_FLOAT, 4}
+};
+
+global OGLAttribute OGL_CAD_LINE_INPUT_ATTRIBUTES[] = {
+    {0, Str8Lit("c2v_points"), GL_FLOAT, 4},
+    {1, Str8Lit("c2v_colour"), GL_FLOAT, 4},
+    {2, Str8Lit("c2v_style"),  GL_FLOAT, 4}
+};
+
+global OGLAttribute OGL_CAD_ARC_INPUT_ATTRIBUTES[] = {
+    {0, Str8Lit("c2v_centre_radius_thickness"), GL_FLOAT, 4},
+    {1, Str8Lit("c2v_colour"),                  GL_FLOAT, 4},
+    {2, Str8Lit("c2v_angle_style"),             GL_FLOAT, 4}
+};
+
+global OGLAttribute OGL_CAD_TRIANGLE_INPUT_ATTRIBUTES[] = {
+    {0, Str8Lit("c2v_points"), GL_FLOAT, 4},
+    {1, Str8Lit("c2v_point"),  GL_FLOAT, 4},
+    {2, Str8Lit("c2v_colour"), GL_FLOAT, 4}
+};
+
+global OGLAttribute OGL_CAD_RIBBON_INPUT_ATTRIBUTES[] = {
+    {0, Str8Lit("c2v_points"), GL_FLOAT, 4},
+    {1, Str8Lit("c2v_colour"), GL_FLOAT, 4},
+    {2, Str8Lit("c2v_style"),  GL_FLOAT, 4}
 };
 
 global OGLAttribute OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES[] = {
@@ -275,30 +301,425 @@ global Str8 OGL_BLUR_PSHADER_SOURCE = Str8Lit(
     ""
 );
 
-Str8 OGL_SHADER_KIND_NAME_TABLE[2] = {
+global Str8 OGL_CAD_LINE_VSHADER_SOURCE = Str8Lit(
+    ""
+    "\n"
+    "#version 330 core\n"
+    "\n"
+    "in vec4 c2v_points;\n"
+    "in vec4 c2v_colour;\n"
+    "in vec4 c2v_style;  // x: thickness_px, y: softness_px, z: cap_kind\n"
+    "\n"
+    "out vec2 v2p_sample_px;\n"
+    "flat out vec2 v2p_mid_px;\n"
+    "flat out vec2 v2p_dir_px;\n"
+    "flat out vec2 v2p_half_ext;  // x: half_len, y: half_thk\n"
+    "flat out float v2p_soft_px;\n"
+    "flat out float v2p_cap_kind;\n"
+    "flat out vec4 v2p_tint;\n"
+    "\n"
+    "uniform mat3 u_xform;\n"
+    "uniform vec2 u_viewport_size_px;\n"
+    "\n"
+    "void main(void)\n"
+    "{\n"
+    "  vec2 a = (u_xform * vec3(c2v_points.xy, 1)).xy;\n"
+    "  vec2 b = (u_xform * vec3(c2v_points.zw, 1)).xy;\n"
+    "  float half_thk = c2v_style.x * 0.5;\n"
+    "  float soft = c2v_style.y;\n"
+    "  float cap = c2v_style.z;\n"
+    "  vec2 d = b - a;\n"
+    "  float len = max(length(d), 1e-5);\n"
+    "  vec2 dir = d / len;\n"
+    "  vec2 prp = vec2(-dir.y, dir.x);\n"
+    "  float cap_ext = (cap > 0.5) ? (half_thk + soft) : soft;\n"
+    "  float half_w = half_thk + soft;\n"
+    "  float end_sel = float(gl_VertexID >> 1);\n"
+    "  float side_sel = float(gl_VertexID & 1);\n"
+    "  vec2 base = mix(a - dir * cap_ext, b + dir * cap_ext, end_sel);\n"
+    "  vec2 off = (side_sel < 0.5) ? (prp * half_w) : (-prp * half_w);\n"
+    "  vec2 corner_px = base + off;\n"
+    "  {\n"
+    "    gl_Position = vec4(2 * corner_px.x / u_viewport_size_px.x - 1,\n"
+    "                       2 * (1 - corner_px.y / u_viewport_size_px.y) - 1,\n"
+    "                       0.0, 1.0);\n"
+    "    v2p_sample_px = corner_px;\n"
+    "    v2p_mid_px    = (a + b) * 0.5;\n"
+    "    v2p_dir_px    = dir;\n"
+    "    v2p_half_ext  = vec2(len * 0.5, half_thk);\n"
+    "    v2p_soft_px   = soft;\n"
+    "    v2p_cap_kind  = cap;\n"
+    "    v2p_tint      = c2v_colour;\n"
+    "  }\n"
+    "}\n"
+    ""
+);
+
+global Str8 OGL_CAD_LINE_PSHADER_SOURCE = Str8Lit(
+    ""
+    "\n"
+    "#version 330 core\n"
+    "\n"
+    "in vec2 v2p_sample_px;\n"
+    "flat in vec2 v2p_mid_px;\n"
+    "flat in vec2 v2p_dir_px;\n"
+    "flat in vec2 v2p_half_ext;\n"
+    "flat in float v2p_soft_px;\n"
+    "flat in float v2p_cap_kind;\n"
+    "flat in vec4 v2p_tint;\n"
+    "\n"
+    "out vec4 final_colour;\n"
+    "\n"
+    "uniform float u_opacity;\n"
+    "\n"
+    "void main(void)\n"
+    "{\n"
+    "  vec2 rel = v2p_sample_px - v2p_mid_px;\n"
+    "  float u = dot(rel, v2p_dir_px);\n"
+    "  float v = dot(rel, vec2(-v2p_dir_px.y, v2p_dir_px.x));\n"
+    "  float half_len = v2p_half_ext.x;\n"
+    "  float half_thk = v2p_half_ext.y;\n"
+    "  float soft = v2p_soft_px;\n"
+    "  float cov;\n"
+    "  if(v2p_cap_kind < 0.5)\n"
+    "  {\n"
+    "    vec2 q = abs(vec2(u, v)) - vec2(half_len, half_thk);\n"
+    "    float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);\n"
+    "    cov = 1.0 - smoothstep(-soft, soft, dist);\n"
+    "  }\n"
+    "  else if(v2p_cap_kind < 1.5)\n"
+    "  {\n"
+    "    float du = max(abs(u) - half_len, 0.0);\n"
+    "    float dist = length(vec2(du, v));\n"
+    "    cov = 1.0 - smoothstep(half_thk - soft, half_thk + soft, dist);\n"
+    "  }\n"
+    "  else\n"
+    "  {\n"
+    "    vec2 q = abs(vec2(u, v)) - vec2(half_len + half_thk, half_thk);\n"
+    "    float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);\n"
+    "    cov = 1.0 - smoothstep(-soft, soft, dist);\n"
+    "  }\n"
+    "  if(cov < 0.001)\n"
+    "  {\n"
+    "    discard;\n"
+    "  }\n"
+    "  \n"
+    "  final_colour = v2p_tint;\n"
+    "  final_colour.a *= cov * u_opacity;\n"
+    "}\n"
+    ""
+);
+
+global Str8 OGL_CAD_ARC_VSHADER_SOURCE = Str8Lit(
+    ""
+    "\n"
+    "#version 330 core\n"
+    "\n"
+    "in vec4 c2v_centre_radius_thickness;  // xy: centre, z: radius, w: thickness_px\n"
+    "in vec4 c2v_colour;\n"
+    "in vec4 c2v_angle_style;  // x: angle_0, y: angle_1, z: softness_px, w: filled\n"
+    "\n"
+    "out vec2 v2p_sample_w;\n"
+    "flat out vec2 v2p_centre_w;\n"
+    "flat out float v2p_radius_w;\n"
+    "flat out float v2p_half_thk_w;\n"
+    "flat out float v2p_soft_w;\n"
+    "flat out vec2 v2p_angles;\n"
+    "flat out float v2p_filled;\n"
+    "flat out vec4 v2p_tint;\n"
+    "\n"
+    "uniform mat3 u_xform;\n"
+    "uniform float u_xform_scale;\n"
+    "uniform vec2 u_viewport_size_px;\n"
+    "\n"
+    "void main(void)\n"
+    "{\n"
+    "  vec2 centre = c2v_centre_radius_thickness.xy;\n"
+    "  float radius = c2v_centre_radius_thickness.z;\n"
+    "  float inv_s = 1.0 / max(u_xform_scale, 1e-5);\n"
+    "  float half_thk_w = (c2v_centre_radius_thickness.w * 0.5) * inv_s;\n"
+    "  float soft_w = c2v_angle_style.z * inv_s;\n"
+    "  float ext = radius + half_thk_w + soft_w;\n"
+    "  float x_sel = float(gl_VertexID >> 1);\n"
+    "  float y_sel = float(gl_VertexID & 1);\n"
+    "  vec2 corner_w = centre + vec2((x_sel < 0.5) ? -ext : ext,\n"
+    "                                (y_sel < 0.5) ?  ext : -ext);\n"
+    "  vec2 px = (u_xform * vec3(corner_w, 1)).xy;\n"
+    "  {\n"
+    "    gl_Position = vec4(2 * px.x / u_viewport_size_px.x - 1,\n"
+    "                       2 * (1 - px.y / u_viewport_size_px.y) - 1,\n"
+    "                       0.0, 1.0);\n"
+    "    v2p_sample_w   = corner_w;\n"
+    "    v2p_centre_w   = centre;\n"
+    "    v2p_radius_w   = radius;\n"
+    "    v2p_half_thk_w = half_thk_w;\n"
+    "    v2p_soft_w     = soft_w;\n"
+    "    v2p_angles     = c2v_angle_style.xy;\n"
+    "    v2p_filled     = c2v_angle_style.w;\n"
+    "    v2p_tint       = c2v_colour;\n"
+    "  }\n"
+    "}\n"
+    ""
+);
+
+global Str8 OGL_CAD_ARC_PSHADER_SOURCE = Str8Lit(
+    ""
+    "\n"
+    "#version 330 core\n"
+    "\n"
+    "in vec2 v2p_sample_w;\n"
+    "flat in vec2 v2p_centre_w;\n"
+    "flat in float v2p_radius_w;\n"
+    "flat in float v2p_half_thk_w;\n"
+    "flat in float v2p_soft_w;\n"
+    "flat in vec2 v2p_angles;\n"
+    "flat in float v2p_filled;\n"
+    "flat in vec4 v2p_tint;\n"
+    "\n"
+    "out vec4 final_colour;\n"
+    "\n"
+    "uniform float u_opacity;\n"
+    "\n"
+    "void main(void)\n"
+    "{\n"
+    "  vec2 dvec = v2p_sample_w - v2p_centre_w;\n"
+    "  float dist = length(dvec);\n"
+    "  float soft = max(v2p_soft_w, 1e-6);\n"
+    "  float cov;\n"
+    "  if(v2p_filled > 0.5)\n"
+    "  {\n"
+    "    cov = 1.0 - smoothstep(v2p_radius_w - soft, v2p_radius_w + soft, dist);\n"
+    "  }\n"
+    "  else\n"
+    "  {\n"
+    "    float ring = abs(dist - v2p_radius_w);\n"
+    "    cov = 1.0 - smoothstep(v2p_half_thk_w - soft, v2p_half_thk_w + soft, ring);\n"
+    "  }\n"
+    "  \n"
+    "  const float two_pi = 6.28318530718;\n"
+    "  float sweep = v2p_angles.y - v2p_angles.x;\n"
+    "  float full = step(two_pi - 1e-4, sweep);\n"
+    "  float rel_a = atan(dvec.y, dvec.x) - v2p_angles.x;\n"
+    "  rel_a = rel_a - floor(rel_a / two_pi) * two_pi;\n"
+    "  float inside = step(rel_a, sweep);\n"
+    "  cov *= max(full, inside);\n"
+    "  if(cov < 0.001)\n"
+    "  {\n"
+    "    discard;\n"
+    "  }\n"
+    "  \n"
+    "  final_colour = v2p_tint;\n"
+    "  final_colour.a *= cov * u_opacity;\n"
+    "}\n"
+    ""
+);
+
+global Str8 OGL_CAD_TRIANGLE_VSHADER_SOURCE = Str8Lit(
+    ""
+    "\n"
+    "#version 330 core\n"
+    "\n"
+    "in vec4 c2v_points;  // xy: point_0, zw: point_1\n"
+    "in vec4 c2v_point;   // xy: point_2\n"
+    "in vec4 c2v_colour;\n"
+    "\n"
+    "out vec4 v2p_tint;\n"
+    "\n"
+    "uniform mat3 u_xform;\n"
+    "uniform vec2 u_viewport_size_px;\n"
+    "\n"
+    "void main(void)\n"
+    "{\n"
+    "  vec2 p = (gl_VertexID == 0) ? c2v_points.xy : ((gl_VertexID == 1) ? c2v_points.zw : c2v_point.xy);\n"
+    "  vec2 px = (u_xform * vec3(p, 1)).xy;\n"
+    "  {\n"
+    "    gl_Position = vec4(2 * px.x / u_viewport_size_px.x - 1,\n"
+    "                       2 * (1 - px.y / u_viewport_size_px.y) - 1,\n"
+    "                       0.0, 1.0);\n"
+    "    v2p_tint = c2v_colour;\n"
+    "  }\n"
+    "}\n"
+    ""
+);
+
+global Str8 OGL_CAD_TRIANGLE_PSHADER_SOURCE = Str8Lit(
+    ""
+    "\n"
+    "#version 330 core\n"
+    "\n"
+    "in vec4 v2p_tint;\n"
+    "\n"
+    "out vec4 final_colour;\n"
+    "\n"
+    "uniform float u_opacity;\n"
+    "\n"
+    "void main(void)\n"
+    "{\n"
+    "  final_colour = v2p_tint;\n"
+    "  final_colour.a *= u_opacity;\n"
+    "}\n"
+    ""
+);
+
+global Str8 OGL_CAD_RIBBON_VSHADER_SOURCE = Str8Lit(
+    ""
+    "\n"
+    "#version 330 core\n"
+    "\n"
+    "in vec4 c2v_points;  // x: x_0, y: top_0, z: x_1, w: top_1\n"
+    "in vec4 c2v_colour;\n"
+    "in vec4 c2v_style;   // x: bottom_0, y: bottom_1, z: thickness_px, w: softness_px\n"
+    "\n"
+    "out vec2 v2p_sample_px;\n"
+    "flat out vec3 v2p_top_edge;  // xy: normal, z: offset\n"
+    "flat out vec3 v2p_bot_edge;\n"
+    "flat out vec4 v2p_box_px;    // x: x_0, y: y_min, z: x_1, w: y_max\n"
+    "flat out float v2p_half_thk;\n"
+    "flat out float v2p_soft_px;\n"
+    "flat out vec4 v2p_tint;\n"
+    "\n"
+    "uniform mat3 u_xform;\n"
+    "uniform vec2 u_viewport_size_px;\n"
+    "\n"
+    "void main(void)\n"
+    "{\n"
+    "  vec2 a = (u_xform * vec3(c2v_points.xy, 1)).xy;\n"
+    "  vec2 b = (u_xform * vec3(c2v_points.zw, 1)).xy;\n"
+    "  vec2 c = (u_xform * vec3(c2v_points.x, c2v_style.x, 1)).xy;\n"
+    "  vec2 d = (u_xform * vec3(c2v_points.z, c2v_style.y, 1)).xy;\n"
+    "  float half_thk = c2v_style.z * 0.5;\n"
+    "  float soft = c2v_style.w;\n"
+    "  float pad = half_thk + soft;\n"
+    "  float y_min = min(a.y, b.y);\n"
+    "  float y_max = max(c.y, d.y);\n"
+    "  float x_sel = float(gl_VertexID >> 1);\n"
+    "  float y_sel = float(gl_VertexID & 1);\n"
+    "  vec2 corner_px = vec2(mix(a.x - pad, b.x + pad, x_sel),\n"
+    "                        mix(y_max + pad, y_min - pad, y_sel));\n"
+    "  vec2 dir_t = normalize(b - a);\n"
+    "  vec2 dir_b = normalize(d - c);\n"
+    "  vec2 nrm_t = vec2(dir_t.y, -dir_t.x);\n"
+    "  vec2 nrm_b = vec2(-dir_b.y, dir_b.x);\n"
+    "  {\n"
+    "    gl_Position = vec4(2 * corner_px.x / u_viewport_size_px.x - 1,\n"
+    "                       2 * (1 - corner_px.y / u_viewport_size_px.y) - 1,\n"
+    "                       0.0, 1.0);\n"
+    "    v2p_sample_px = corner_px;\n"
+    "    v2p_top_edge  = vec3(nrm_t, -dot(nrm_t, a));\n"
+    "    v2p_bot_edge  = vec3(nrm_b, -dot(nrm_b, c));\n"
+    "    v2p_box_px    = vec4(a.x, y_min, b.x, y_max);\n"
+    "    v2p_half_thk  = half_thk;\n"
+    "    v2p_soft_px   = soft;\n"
+    "    v2p_tint      = c2v_colour;\n"
+    "  }\n"
+    "}\n"
+    ""
+);
+
+global Str8 OGL_CAD_RIBBON_PSHADER_SOURCE = Str8Lit(
+    ""
+    "\n"
+    "#version 330 core\n"
+    "\n"
+    "in vec2 v2p_sample_px;\n"
+    "flat in vec3 v2p_top_edge;\n"
+    "flat in vec3 v2p_bot_edge;\n"
+    "flat in vec4 v2p_box_px;\n"
+    "flat in float v2p_half_thk;\n"
+    "flat in float v2p_soft_px;\n"
+    "flat in vec4 v2p_tint;\n"
+    "\n"
+    "out vec4 final_colour;\n"
+    "\n"
+    "uniform float u_opacity;\n"
+    "\n"
+    "void main(void)\n"
+    "{\n"
+    "  vec2 p = v2p_sample_px;\n"
+    "  float d_top = dot(v2p_top_edge.xy, p) + v2p_top_edge.z;\n"
+    "  float d_bot = dot(v2p_bot_edge.xy, p) + v2p_bot_edge.z;\n"
+    "  vec2 d_box = max(v2p_box_px.xy - p, p - v2p_box_px.zw);\n"
+    "  float dist = max(max(d_top, d_bot), max(d_box.x, d_box.y));\n"
+    "  float cov = 1.0 - smoothstep(v2p_half_thk - v2p_soft_px, v2p_half_thk + v2p_soft_px, dist);\n"
+    "  if(cov < 0.001)\n"
+    "  {\n"
+    "    discard;\n"
+    "  }\n"
+    "  \n"
+    "  final_colour = v2p_tint;\n"
+    "  final_colour.a *= cov * u_opacity;\n"
+    "}\n"
+    ""
+);
+
+Str8 OGL_SHADER_KIND_NAME_TABLE[SHADER_KIND_COUNT] = {
     Str8Lit("rect"),
-    Str8Lit("blur")
+    Str8Lit("blur"),
+    Str8Lit("cad_line"),
+    Str8Lit("cad_arc"),
+    Str8Lit("cad_triangle"),
+    Str8Lit("cad_ribbon")
 };
 
-Str8* OGL_SHADER_KIND_VSHADER_SRC_TABLE[2] = {
+Str8* OGL_SHADER_KIND_VSHADER_SRC_TABLE[SHADER_KIND_COUNT] = {
     &OGL_RECT_VSHADER_SOURCE,
-    &OGL_BLUR_VSHADER_SOURCE
+    &OGL_BLUR_VSHADER_SOURCE,
+    &OGL_CAD_LINE_VSHADER_SOURCE,
+    &OGL_CAD_ARC_VSHADER_SOURCE,
+    &OGL_CAD_TRIANGLE_VSHADER_SOURCE,
+    &OGL_CAD_RIBBON_VSHADER_SOURCE
 };
 
-Str8* OGL_SHADER_KIND_PSHADER_SRC_TABLE[2] = {
+Str8* OGL_SHADER_KIND_PSHADER_SRC_TABLE[SHADER_KIND_COUNT] = {
     &OGL_RECT_PSHADER_SOURCE,
-    &OGL_BLUR_PSHADER_SOURCE
+    &OGL_BLUR_PSHADER_SOURCE,
+    &OGL_CAD_LINE_PSHADER_SOURCE,
+    &OGL_CAD_ARC_PSHADER_SOURCE,
+    &OGL_CAD_TRIANGLE_PSHADER_SOURCE,
+    &OGL_CAD_RIBBON_PSHADER_SOURCE
 };
 
-OGLAttributeArray OGL_SHADER_KIND_INPUT_ATTRIBUTES_TABLE[2] = {
+OGLAttributeArray OGL_SHADER_KIND_INPUT_ATTRIBUTES_TABLE[SHADER_KIND_COUNT] = {
     {
         OGL_RECT_INPUT_ATTRIBUTES,
         ARRAY_COUNT(OGL_RECT_INPUT_ATTRIBUTES)
     },
-    {0}
+    {0},
+    {
+        OGL_CAD_LINE_INPUT_ATTRIBUTES,
+        ARRAY_COUNT(OGL_CAD_LINE_INPUT_ATTRIBUTES)
+    },
+    {
+        OGL_CAD_ARC_INPUT_ATTRIBUTES,
+        ARRAY_COUNT(OGL_CAD_ARC_INPUT_ATTRIBUTES)
+    },
+    {
+        OGL_CAD_TRIANGLE_INPUT_ATTRIBUTES,
+        ARRAY_COUNT(OGL_CAD_TRIANGLE_INPUT_ATTRIBUTES)
+    },
+    {
+        OGL_CAD_RIBBON_INPUT_ATTRIBUTES,
+        ARRAY_COUNT(OGL_CAD_RIBBON_INPUT_ATTRIBUTES)
+    }
 };
 
-OGLAttributeArray OGL_SHADER_KIND_OUTPUT_ATTRIBUTES_TABLE[2] = {
+OGLAttributeArray OGL_SHADER_KIND_OUTPUT_ATTRIBUTES_TABLE[SHADER_KIND_COUNT] = {
+    {
+        OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES,
+        ARRAY_COUNT(OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES)
+    },
+    {
+        OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES,
+        ARRAY_COUNT(OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES)
+    },
+    {
+        OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES,
+        ARRAY_COUNT(OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES)
+    },
+    {
+        OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES,
+        ARRAY_COUNT(OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES)
+    },
     {
         OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES,
         ARRAY_COUNT(OGL_SINGLE_COLOUR_OUTPUT_ATTRIBUTES)
@@ -340,36 +761,52 @@ OGLFormatInfoFromTex2DFmt(RendTex2DFmt Format)
     return Result;
 }
 
-GLuint 
-OGLInstanceBufferFromSize(u64 Size)
+// NOTE(nc): binds a buffer that holds Size bytes to GL_ARRAY_BUFFER, with
+//         : a new store. the buffer is in more than one draw of a frame,
+//         : and a new store means the driver does not wait for the draw
+//         : before this one.
+void 
+OGLInstanceBufferBind(u64 Size)
 {
     GLuint Buffer = OGL_STATE->ScratchBuffer64KB;
+    u64 Capacity = KB(64);
 
     if (Size > KB(64)) {
-        u64 FlushedBufferSize = Size;
+        // NOTE(nc): one buffer for all the lists above 64KB. it grows to
+        //         : the largest list and stays.
+        if (Size > OGL_STATE->InstanceBufferSize) {
+            u64 NewSize = Size;
 
-        FlushedBufferSize += MB(1) - 1;
-        FlushedBufferSize -= FlushedBufferSize % MB(1);
-        glGenBuffers(1, &Buffer);
-        glBindBuffer(GL_ARRAY_BUFFER, Buffer);
-        glBufferData(GL_ARRAY_BUFFER, FlushedBufferSize, 0, GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
+            NewSize += MB(1) - 1;
+            NewSize -= NewSize % MB(1);
 
-        OGLFlushBuffer* FlushBuffer = ArenaPushArrayZero(
-            OGL_STATE->BufferFlushMemPool,
-            OGLFlushBuffer,
-            1
-        );
+            // NOTE(nc): a draw of this frame can still use the old
+            //         : buffer, so it is deleted at the end of the frame
+            if (OGL_STATE->InstanceBuffer) {
+                OGLFlushBuffer* FlushBuffer = ArenaPushArrayZero(
+                    OGL_STATE->BufferFlushMemPool,
+                    OGLFlushBuffer,
+                    1
+                );
 
-        FlushBuffer->ID = Buffer;
-        SLL_QUEUE_PUSH(
-            OGL_STATE->HeadBufferToFlush,
-            OGL_STATE->TailBufferToFlush,
-            FlushBuffer
-        );
+                FlushBuffer->ID = OGL_STATE->InstanceBuffer;
+                SLL_QUEUE_PUSH(
+                    OGL_STATE->HeadBufferToFlush,
+                    OGL_STATE->TailBufferToFlush,
+                    FlushBuffer
+                );
+            }
+
+            glGenBuffers(1, &OGL_STATE->InstanceBuffer);
+            OGL_STATE->InstanceBufferSize = NewSize;
+        }
+
+        Buffer = OGL_STATE->InstanceBuffer;
+        Capacity = OGL_STATE->InstanceBufferSize;
     }
 
-    return Buffer;
+    glBindBuffer(GL_ARRAY_BUFFER, Buffer);
+    glBufferData(GL_ARRAY_BUFFER, (dptr) Capacity, 0, GL_DYNAMIC_DRAW);
 }
 
 void 
@@ -422,10 +859,19 @@ RendInit(CommandLine* CLI)
         1
     );
     OGL_STATE->MemPool = MemPool;
+    OGL_STATE->Tex2DMtx = MutexAlloc();
+    OGL_STATE->UploadMemPool = ArenaAlloc();
 
 #define X(Name, R, P) Name = (Name##FuncType*) OGLLoadProcedure(#Name);
     OGL_PROC_XLIST
 #undef X
+
+    LogInfo(
+        "[OPENGL] %s, %s, %s",
+        (char*) glGetString(GL_VENDOR),
+        (char*) glGetString(GL_RENDERER),
+        (char*) glGetString(GL_VERSION)
+    );
 
     for EACH_ENUM(OGLShaderKind, K, SHADER_KIND_COUNT) {
         struct {
@@ -483,6 +929,14 @@ RendInit(CommandLine* CLI)
                     InfoLogLength,
                     0,
                     (char*) Stages[Index].Errors.Str
+                );
+            }
+
+            if (!FinalStatus) {
+                LogError(
+                    "[OPENGL] the %S shader did not compile: %S",
+                    PRINT_STR(OGL_SHADER_KIND_NAME_TABLE[K]),
+                    PRINT_STR(Stages[Index].Errors)
                 );
             }
         }
@@ -591,9 +1045,46 @@ RendUnequipWindow(Handle WindowHandle, RendHandle Renderer)
     OGLWindow* Window = (OGLWindow*) PTR_FROM_INT(Renderer.U64[0]);
 
     if (Window) {
+        if (Window->CapturePBO)
+            glDeleteBuffers(1, &Window->CapturePBO);
+
+        OGLRenderTarget* Targets[] = {
+            &Window->StageTarget,
+            &Window->StageScratchTarget
+        };
+
+        for (u64 Index = 0; Index < ARRAY_COUNT(Targets); ++Index) {
+            if (Targets[Index]->FBO) {
+                glDeleteFramebuffers(1, &Targets[Index]->FBO);
+                glDeleteTextures(1, &Targets[Index]->ColourTexture);
+            }
+        }
+
         OGLUnequipWindow(WindowHandle, Window->Handle);
         SLL_STACK_PUSH(OGL_STATE->FreeWindow, Window);
     }
+}
+
+// NOTE(nc): on the thread of the context only
+INTERNAL void
+OGLTex2DUpload(OGLTex2D* Tex2D, void* Data)
+{
+    OGLFormatInfo FormatInfo = OGLFormatInfoFromTex2DFmt(Tex2D->Format);
+
+    glGenTextures(1, &Tex2D->ID);
+    glBindTexture(GL_TEXTURE_2D, Tex2D->ID);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        FormatInfo.InternalFormat,
+        Tex2D->Size.X,
+        Tex2D->Size.Y,
+        0,
+        FormatInfo.Format,
+        FormatInfo.BaseType,
+        Data
+    );
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 RendHandle 
@@ -603,49 +1094,71 @@ Tex2DAlloc(
     RendTex2DFmt Format, 
     void* Data
 ) {
-    OGLTex2D* Tex2D = OGL_STATE->FreeTex2D;
+    // NOTE(nc): a thread with no context cannot make the texture. it
+    //         : keeps a copy of the pixels, and RendBeginFrame makes the
+    //         : texture on the main thread. that is after the build of
+    //         : the frame and before its submit, so a texture that the
+    //         : build saw is made before it is drawn.
+    b32 IsDeferred = !OGLIsContextCurrent();
+    OGLTex2D* Tex2D = NULL;
 
-    if (Tex2D)
-        SLL_STACK_POP(OGL_STATE->FreeTex2D);
-    else
-        Tex2D = ArenaPushArrayZero(OGL_STATE->MemPool, OGLTex2D, 1);
+    LOCK_SCOPE(OGL_STATE->Tex2DMtx) {
+        Tex2D = OGL_STATE->FreeTex2D;
 
-    OGLFormatInfo FormatInfo = OGLFormatInfoFromTex2DFmt(Format);
+        if (Tex2D)
+            SLL_STACK_POP(OGL_STATE->FreeTex2D);
+        else
+            Tex2D = ArenaPushArray(OGL_STATE->MemPool, OGLTex2D, 1);
 
-    {
-        glGenTextures(1, &Tex2D->ID);
-        glBindTexture(GL_TEXTURE_2D, Tex2D->ID);
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            FormatInfo.InternalFormat,
-            Size.X,
-            Size.Y,
-            0,
-            FormatInfo.Format,
-            FormatInfo.BaseType,
-            Data
-        );
-        glBindTexture(GL_TEXTURE_2D, 0);
+        MemZero(Tex2D, sizeof(*Tex2D));
+        Tex2D->ResourceKind = Kind;
+        Tex2D->Format = Format;
+        Tex2D->Size = Size;
+
+        if (IsDeferred) {
+            if (Data) {
+                // NOTE(nc): the upload reads 4 bytes for each pixel for
+                //         : all formats, so the copy is not smaller
+                u64 PixelCount = (u64) Size.X * (u64) Size.Y;
+                u64 PixelSize = (u64) TEX2D_FMT_BYTES_PER_PIXEL[Format];
+
+                Tex2D->UploadData = ArenaPushArrayZero(
+                    OGL_STATE->UploadMemPool,
+                    u8,
+                    PixelCount * MAX(PixelSize, (u64) 4)
+                );
+                MemCpy(Tex2D->UploadData, Data, PixelCount * PixelSize);
+            }
+
+            Tex2D->IsUploadPending = TRUE;
+            SLL_QUEUE_PUSH_EX(
+                OGL_STATE->HeadUploadTex2D,
+                OGL_STATE->TailUploadTex2D,
+                Tex2D,
+                UploadNext
+            );
+        }
     }
 
-    Tex2D->ResourceKind = Kind;
-    Tex2D->Format = Format;
-    Tex2D->Size = Size;
+    if (!IsDeferred)
+        OGLTex2DUpload(Tex2D, Data);
 
     RendHandle Result = RendHandleFromTex2D(Tex2D);
 
     return Result;
 }
 
+// NOTE(nc): any thread. the texture is deleted at the end of a frame, on
+//         : the main thread, so a frame that drew it has it to the end.
 void 
 Tex2DRelease(RendHandle Texture)
 {
     OGLTex2D* Tex2D = RendTex2DFromHandle(Texture);
 
     if (Tex2D) {
-        glDeleteTextures(1, &Tex2D->ID);
-        SLL_STACK_PUSH(OGL_STATE->FreeTex2D, Tex2D);
+        LOCK_SCOPE(OGL_STATE->Tex2DMtx) {
+            SLL_STACK_PUSH(OGL_STATE->ToFreeTex2D, Tex2D);
+        }
     }
 }
 
@@ -726,7 +1239,23 @@ RendBufferRelease(RendHandle Buffer)
 
 void 
 RendBeginFrame(void)
-{}
+{
+    LOCK_SCOPE(OGL_STATE->Tex2DMtx) {
+        for (
+            OGLTex2D* Tex2D = OGL_STATE->HeadUploadTex2D;
+            Tex2D;
+            Tex2D = Tex2D->UploadNext
+        ) {
+            OGLTex2DUpload(Tex2D, Tex2D->UploadData);
+            Tex2D->UploadData = NULL;
+            Tex2D->IsUploadPending = FALSE;
+        }
+
+        OGL_STATE->HeadUploadTex2D = NULL;
+        OGL_STATE->TailUploadTex2D = NULL;
+        ArenaClear(OGL_STATE->UploadMemPool);
+    }
+}
 
 void 
 RendEndFrame(void)
@@ -742,6 +1271,33 @@ RendEndFrame(void)
     ArenaClear(OGL_STATE->BufferFlushMemPool);
     OGL_STATE->HeadBufferToFlush = NULL;
     OGL_STATE->TailBufferToFlush = NULL;
+
+    LOCK_SCOPE(OGL_STATE->Tex2DMtx) {
+        OGLTex2D* Waiting = NULL;
+
+        for (
+            OGLTex2D* Tex2D = OGL_STATE->ToFreeTex2D, *Next = NULL;
+            Tex2D;
+            Tex2D = Next
+        ) {
+            Next = Tex2D->Next;
+
+            // NOTE(nc): released before its upload. it is in the upload
+            //         : list, so it is not free until the next frame.
+            if (Tex2D->IsUploadPending) {
+                SLL_STACK_PUSH(Waiting, Tex2D);
+                continue;
+            }
+
+            if (Tex2D->ID)
+                glDeleteTextures(1, &Tex2D->ID);
+
+            Tex2D->ID = 0;
+            SLL_STACK_PUSH(OGL_STATE->FreeTex2D, Tex2D);
+        }
+
+        OGL_STATE->ToFreeTex2D = Waiting;
+    }
 }
 
 void 
@@ -781,7 +1337,7 @@ RendBeginWindowFrame(Handle WindowHandle, RendHandle Renderer)
                     glTexImage2D(
                         GL_TEXTURE_2D,
                         0,
-                        GL_RGBA32F,
+                        GL_RGBA16F,
                         (i32) ClientRectLength.X,
                         (i32) ClientRectLength.Y,
                         0,
@@ -843,6 +1399,59 @@ RendEndWindowFrame(Handle WindowHandle, RendHandle Renderer)
         }
     }
 
+
+    // NOTE(nc): the frame is in the back buffer and it is not swapped yet.
+    //         : after the swap the buffer has no defined content, so the
+    //         : read is made here. it goes to a pixel buffer, so the frame
+    //         : does not wait for the pixels.
+    if (Window->IsCapturePending) {
+        v2i32 Resolution = Vec(
+            (i32) Window->PrevClientRectLength.X,
+            (i32) Window->PrevClientRectLength.Y
+        );
+        r2i32 Rect = Window->CaptureRect;
+
+        Rect.X0 = CLAMP(0, Rect.X0, Resolution.X);
+        Rect.Y0 = CLAMP(0, Rect.Y0, Resolution.Y);
+        Rect.X1 = CLAMP(0, Rect.X1, Resolution.X);
+        Rect.Y1 = CLAMP(0, Rect.Y1, Resolution.Y);
+
+        if (Window->CapturePBO) {
+            glDeleteBuffers(1, &Window->CapturePBO);
+            Window->CapturePBO = 0;
+        }
+
+        if (Rect.X0 < Rect.X1 && Rect.Y0 < Rect.Y1) {
+            v2i32 Size = Vec(Rect.X1 - Rect.X0, Rect.Y1 - Rect.Y0);
+
+            glGenBuffers(1, &Window->CapturePBO);
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, Window->CapturePBO);
+            glBufferData(
+                GL_PIXEL_PACK_BUFFER,
+                (dptr) Size.X * 4 * (dptr) Size.Y,
+                0,
+                GL_STREAM_READ
+            );
+
+            // NOTE(nc): the rows of OpenGL go up, the rect goes down
+            glReadBuffer(GL_BACK);
+            glReadPixels(
+                Rect.X0,
+                Resolution.Y - Rect.Y1,
+                Size.X,
+                Size.Y,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                0
+            );
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            Window->CaptureRect = Rect;
+        }
+
+        Window->IsCapturePending = FALSE;
+    }
+
+
     OGLSwapWindow(WindowHandle, Renderer);
 }
 
@@ -898,13 +1507,9 @@ RendSubmitWindow(
                                     }
                                 }
 
-                                GLuint Buffer = OGLInstanceBufferFromSize(
-                                    Batches->ByteCount
-                                );
+                                OGLInstanceBufferBind(Batches->ByteCount);
 
                                 {
-                                    glBindBuffer(GL_ARRAY_BUFFER, Buffer);
-
                                     u64 Offset = 0;
 
                                     for (
@@ -1055,14 +1660,11 @@ RendSubmitWindow(
                                     BatchParams->Clip.Y0 != 0.0f ||
                                     BatchParams->Clip.Y1 != 0.0f
                                 ) {
-                                    if (
-                                        OGLScissor(
-                                            BatchParams->Clip, 
-                                            ViewPortRectLength
-                                        )
-                                    ) {
-                                        glEnable(GL_SCISSOR_TEST);
-                                    }
+                                    OGLScissor(
+                                        BatchParams->Clip,
+                                        ViewPortRectLength
+                                    );
+                                    glEnable(GL_SCISSOR_TEST);
                                 }
 
                                 {
@@ -1188,14 +1790,11 @@ RendSubmitWindow(
                             Params->Clip.Y0 != 0.0f ||
                             Params->Clip.Y1 != 0.0f
                         ) {
-                            if (
-                                OGLScissor(
-                                    Params->Clip,
-                                    ViewPortRectLength
-                                )
-                            ) {
-                                glEnable(GL_SCISSOR_TEST);
-                            }
+                            OGLScissor(
+                                Params->Clip,
+                                ViewPortRectLength
+                            );
+                            glEnable(GL_SCISSOR_TEST);
                         }
 
                         GL_BIND_FRAME_BUFFER_SCOPE(
@@ -1283,6 +1882,252 @@ RendSubmitWindow(
 
                 // TODO(nc): this
             } break;
+
+            case PASS_KIND_CAD: {
+                RendPassCADParams* Params = Pass->CADParams;
+                v2f32 XFormCol0 = Vec(
+                    Params->XForm.V[0][0],
+                    Params->XForm.V[0][1]
+                );
+                f32 XFormScale = Length(XFormCol0);
+
+                struct CADDraw {
+                    RendBatchList* List;
+                    OGLShaderKind  Kind;
+                    GLenum         Mode;
+                    u32            VertsPerInstance;
+                };
+
+                CADDraw Draws[] = {
+                    {
+                        &Params->Triangles,
+                        SHADER_KIND_CAD_TRIANGLE,
+                        GL_TRIANGLES,
+                        3
+                    },
+                    {
+                        &Params->Arcs,
+                        SHADER_KIND_CAD_ARC,
+                        GL_TRIANGLE_STRIP,
+                        4
+                    },
+                    {
+                        &Params->Ribbons,
+                        SHADER_KIND_CAD_RIBBON,
+                        GL_TRIANGLE_STRIP,
+                        4
+                    },
+                    {
+                        &Params->Lines,
+                        SHADER_KIND_CAD_LINE,
+                        GL_TRIANGLE_STRIP,
+                        4
+                    }
+                };
+
+                GL_BIND_VERTEX_ARRAY_SCOPE(OGL_STATE->AllPurposeVAO) {
+                    GL_BIND_FRAME_BUFFER_SCOPE(
+                        GL_FRAMEBUFFER,
+                        Window->StageTarget.FBO
+                    ) {
+                        // NOTE(nc): a clip with no area draws nothing, as
+                        //         : it does in the DX11 pass
+                        if (
+                            Params->Clip.X0 != 0.0f ||
+                            Params->Clip.X1 != 0.0f ||
+                            Params->Clip.Y0 != 0.0f ||
+                            Params->Clip.Y1 != 0.0f
+                        ) {
+                            OGLScissor(Params->Clip, ViewPortRectLength);
+                            glEnable(GL_SCISSOR_TEST);
+                        }
+
+                        for (
+                            u64 DrawIndex = 0;
+                            DrawIndex < ARRAY_COUNT(Draws);
+                            ++DrawIndex
+                        ) {
+                            CADDraw* Draw = &Draws[DrawIndex];
+                            RendBatchList* Batches = Draw->List;
+
+                            if (!Batches->ByteCount)
+                                continue;
+
+                            GLuint Shader = OGL_STATE->Shaders[Draw->Kind];
+
+                            GL_USE_PROGRAM_SCOPE(Shader) {
+                                {
+                                    OGLInstanceBufferBind(
+                                        Batches->ByteCount
+                                    );
+
+                                    u64 Offset = 0;
+
+                                    for (
+                                        RendBatchNode* BNode = Batches->Head;
+                                        BNode;
+                                        BNode = BNode->Next
+                                    ) {
+                                        glBufferSubData(
+                                            GL_ARRAY_BUFFER,
+                                            Offset,
+                                            BNode->V.ByteCount,
+                                            BNode->V.V
+                                        );
+                                        Offset += BNode->V.ByteCount;
+                                    }
+                                }
+
+                                {
+                                    OGLAttributeArray Inputs = OGL_SHADER_KIND_INPUT_ATTRIBUTES_TABLE[Draw->Kind];
+                                    u64 Offset = 0;
+
+                                    for (
+                                        u64 Index = 0;
+                                        Index < Inputs.Count;
+                                        ++Index
+                                    ) {
+                                        glEnableVertexAttribArray(
+                                            Inputs.V[Index].Index
+                                        );
+                                        glVertexAttribDivisor(
+                                            Inputs.V[Index].Index,
+                                            1
+                                        );
+                                        glVertexAttribPointer(
+                                            Inputs.V[Index].Index,
+                                            Inputs.V[Index].Count,
+                                            Inputs.V[Index].Type,
+                                            GL_FALSE,
+                                            Batches->BytesPerInstruction,
+                                            (void*) Offset
+                                        );
+                                        Offset += Inputs.V[Index].Count * sizeof(f32);
+                                    }
+                                }
+
+                                {
+                                    glUniform2f(
+                                        glGetUniformLocation(
+                                            Shader,
+                                            "u_viewport_size_px"
+                                        ),
+                                        ViewPortRectLength.X,
+                                        ViewPortRectLength.Y
+                                    );
+                                    glUniform1f(
+                                        glGetUniformLocation(
+                                            Shader,
+                                            "u_opacity"
+                                        ),
+                                        1.0f
+                                    );
+                                    glUniform1f(
+                                        glGetUniformLocation(
+                                            Shader,
+                                            "u_xform_scale"
+                                        ),
+                                        XFormScale
+                                    );
+                                    glUniformMatrix3fv(
+                                        glGetUniformLocation(
+                                            Shader,
+                                            "u_xform"
+                                        ),
+                                        1,
+                                        0,
+                                        &Params->XForm.V[0][0]
+                                    );
+                                }
+
+                                glDrawArraysInstanced(
+                                    Draw->Mode,
+                                    0,
+                                    Draw->VertsPerInstance,
+                                    Batches->ByteCount / Batches->BytesPerInstruction
+                                );
+                            }
+                        }
+
+                        glDisable(GL_SCISSOR_TEST);
+                    }
+                }
+            } break;
         }
     }
+}
+
+
+
+void
+RendRequestWindowCapture(RendHandle Renderer, r2i32 Rect)
+{
+    OGLWindow* Window = (OGLWindow*) PTR_FROM_INT(Renderer.U64[0]);
+
+    if (Window) {
+        Window->CaptureRect = Rect;
+        Window->IsCapturePending = TRUE;
+    }
+}
+
+b32
+RendTakeWindowCapture(
+    RendHandle Renderer,
+    Arena* MemPool,
+    OUT RendCapture* Capture
+) {
+    b32 Result = FALSE;
+    OGLWindow* Window = (OGLWindow*) PTR_FROM_INT(Renderer.U64[0]);
+
+    MemZero(Capture, sizeof(*Capture));
+
+    if (Window && Window->CapturePBO) {
+        v2i32 Size = Vec(
+            (i32) (Window->CaptureRect.X1 - Window->CaptureRect.X0),
+            (i32) (Window->CaptureRect.Y1 - Window->CaptureRect.Y0)
+        );
+        u64 RowSize = (u64) Size.X * 4;
+
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, Window->CapturePBO);
+
+        u8 const* Rows = (u8 const*) glMapBufferRange(
+            GL_PIXEL_PACK_BUFFER,
+            0,
+            (dptr) (RowSize * (u64) Size.Y),
+            GL_MAP_READ_BIT
+        );
+
+        if (Rows) {
+            u8* Pixels = ArenaPushArray(
+                MemPool,
+                u8,
+                RowSize * (u64) Size.Y
+            );
+
+            // NOTE(nc): the pixel buffer has the bottom row first, the
+            //         : capture has the top row first
+            for (i32 Y = 0; Y < Size.Y; ++Y) {
+                u8 const* Src = Rows + (u64) (Size.Y - 1 - Y) * RowSize;
+                u8* Dst = Pixels + (u64) Y * RowSize;
+
+                for (i32 X = 0; X < Size.X; ++X, Src += 4, Dst += 4) {
+                    Dst[0] = Src[0];
+                    Dst[1] = Src[1];
+                    Dst[2] = Src[2];
+                    Dst[3] = 0xFF;
+                }
+            }
+
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+            Capture->Pixels = Pixels;
+            Capture->Size = Size;
+            Result = TRUE;
+        }
+
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        glDeleteBuffers(1, &Window->CapturePBO);
+        Window->CapturePBO = 0;
+    }
+
+    return Result;
 }

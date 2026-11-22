@@ -15,6 +15,16 @@ OGLLoadProcedure(char* Name)
     return Result;
 }
 
+// NOTE(nc): the context is current on one thread only, the main one. a
+//         : call to OpenGL from another thread does nothing.
+b32
+OGLIsContextCurrent(void)
+{
+    b32 Result = (glXGetCurrentContext() != NULL);
+
+    return Result;
+}
+
 void 
 OGLInit(CommandLine* CLI)
 {
