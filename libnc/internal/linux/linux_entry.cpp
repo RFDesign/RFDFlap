@@ -39,11 +39,14 @@ SignalHandler(int Signal, siginfo_t* SigInfo, void* Param)
         if (CommandFile) {
             char FuncName[256] = {};
             char FileName[256] = {};
+            b32 IsSymbolised = FALSE;
 
             if (
                 fgets(FuncName, sizeof(FuncName), CommandFile) &&
                 fgets(FileName, sizeof(FileName), CommandFile)
             ) {
+                IsSymbolised = TRUE;
+
                 Str8 Func = CStr8(FuncName);
 
                 if (Func.Size)
@@ -76,9 +79,22 @@ SignalHandler(int Signal, siginfo_t* SigInfo, void* Param)
             }
 
             pclose(CommandFile);
+
+            // NOTE(nc): no symbolizer on this machine, so the address is
+            //         : printed for addr2line
+            if (!IsSymbolised) {
+                PrintErr(
+                    "%ld. [0x%016lX] %s +0x%lX\n",
+                    Index + 1,
+                    (unsigned long) IPs[Index],
+                    Info.dli_fname,
+                    (unsigned long) IPs[Index] - (unsigned long) Info.dli_fbase
+                );
+            }
         } else {
             PrintErr(
-                "%ld. [0x%016lX] %s\n", 
+                "%ld. [0x%016lX] %s\n",
+                Index + 1,
                 (unsigned long) IPs[Index], 
                 Info.dli_fname
             );

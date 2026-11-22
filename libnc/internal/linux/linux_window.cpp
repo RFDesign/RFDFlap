@@ -1881,6 +1881,11 @@ Handle
 WindowOpen(r2f32 Rect, WindowPropertyKind Properties, Str8 Title)
 {
     v2f32 Resolution = Length(Rect);
+
+    // NOTE(nc): X11 has BadValue for a width or height of 0
+    Resolution.X = MAX(1.0f, Resolution.X);
+    Resolution.Y = MAX(1.0f, Resolution.Y);
+
     LinuxWindow* SystemWindow = GRAPHICS_STATE->FreeWindow;
 
     if (SystemWindow)

@@ -3508,7 +3508,21 @@ AppViewUI(r2f32 Rect)
                     }
 
                     EvalParentKey(ExprEval.Key) {
-                        ViewUIRule->ViewUIFunc(ExprEval, Rect);
+                        if (ViewUIRule->ViewUIFunc) {
+                            ViewUIRule->ViewUIFunc(ExprEval, Rect);
+                        } else {
+                            // NOTE(nc): a tab with a view name that has no
+                            //         : rule, so there is no function to call
+                            UITag("weak"_s8) {
+                                UILabel(
+                                    ArenaPushStrFmt(
+                                        UIBuildMemPool(),
+                                        "No view is registered for '%S'.",
+                                        PRINT_STR(ViewName)
+                                    )
+                                );
+                            }
+                        }
                     }
 
                     ReleaseScratch(Scratch);

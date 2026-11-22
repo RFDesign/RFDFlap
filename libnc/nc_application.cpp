@@ -10677,7 +10677,7 @@ AppFrame(void)
                                 ConfigNode* Root0 = ConfigNodeNew(
                                     APP_STATE->Config,
                                     Panels, 
-                                    "100.0"_s8
+                                    "1.0"_s8
                                 );
                                 ConfigNode* MainPanel = Root0;
 
@@ -10731,7 +10731,7 @@ AppFrame(void)
                                 ConfigNode* Root0 = ConfigNodeNew(
                                     APP_STATE->Config,
                                     Panels, 
-                                    "100.0"_s8
+                                    "1.0"_s8
                                 );
                                 ConfigNode* MainPanel = Root0;
 
@@ -14254,6 +14254,11 @@ AppWindowStateFromConfig(ConfigNode* Config)
         Position.Y = (f32) F64FromStr(PositionConfig->Head->Next->String);
         Size.X = (f32) F64FromStr(SizeConfig->Head->String);
         Size.Y = (f32) F64FromStr(SizeConfig->Head->Next->String);
+
+        // NOTE(nc): a session with no size, or a size of 0, is not a
+        //         : window that X11 can make (BadValue)
+        if (Size.X < 1.0f || Size.Y < 1.0f)
+            Size = Vec(1280.0f, 720.0f);
 
         HandleArray Monitors = ArenaPushMonitorArray(Scratch.MemPool);
 
