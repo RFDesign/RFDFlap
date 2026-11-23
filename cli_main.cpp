@@ -4,6 +4,7 @@
 #include "nc_print.h"
 #include "nc_sync.h"
 #include "nc_simd.h"
+#include "nc_sort.h"
 
 #include "fli.h"
 #include "fli_bin.h"
@@ -192,6 +193,22 @@ CLIGatherDir(Arena* MemPool, Str8List* Dirs, Str8 Dir, b32 AllocIfMissing)
     SystemFileIterEnd(Iter);
 }
 
+// NOTE(nc): the larger flight is first. a BIN with no FLI yet is as large
+//         : as its BIN.
+INTERNAL i32
+CLIFlightCmp(CLIFlight** A, CLIFlight** B)
+{
+    CLIFlight const* FlightA = *A;
+    CLIFlight const* FlightB = *B;
+    u64 SizeA = MAX(FlightA->BINSize, FlightA->FLISize);
+    u64 SizeB = MAX(FlightB->BINSize, FlightB->FLISize);
+    i32 Result = (i32) (SizeA < SizeB) - (i32) (SizeA > SizeB);
+
+    return Result;
+}
+
+NC_DEFINE_QUICKSORT(CLIFlights, CLIFlight*, CLIFlightCmp)
+
 INTERNAL void
 CLIGather(CommandLine* CLI)
 {
@@ -262,6 +279,7 @@ CLIGather(CommandLine* CLI)
         }
     }
 
+    QuickSortCLIFlights(CLI_SHARED->Flights, CLI_SHARED->FlightsCount);
     ReleaseScratch(Scratch);
 }
 
@@ -714,7 +732,7 @@ CLIDirectivePath(
 ) {
     Str8 Dir = CLI_SHARED->OutputPath;
     Str8 Kind = "graph"_s8;
-    Str8 Label = {};
+    Str8 Label = ""_s8;
 
     if (!Dir.Size) {
         Dir = StrChopLastSlash(Flight->FLIPath);
@@ -1070,12 +1088,130 @@ CLIExportDirective(
     return Result;
 }
 
+INTERNAL void
+CLIMarkSections(
+    u64* Needed,
+    FLIParsed* FLI,
+    FLVBoundSlot const* Bound,
+    u32 SlotsCount
+) {
+    for (u32 Index = 0; Index < SlotsCount; ++Index) {
+        FLVBoundSlot const* Slot = &Bound[Index];
+        u32 Indices[3] = {
+            Slot->Column,
+            Slot->TimeColumn,
+            Slot->InstanceColumn
+        };
+
+        if (Slot->IsMissing)
+            continue;
+
+        for (u32 I = 0; I < ARRAY_COUNT(Indices); ++I) {
+            if (Indices[I] == FLV_COLUMN_NONE)
+                continue;
+
+            u64 Section = FLIElementFromNameIndex(
+                FLI,
+                Columns,
+                COLUMNS,
+                Indices[I]
+            )->SectionIndex;
+
+            if (Section < FLI->SectionsCount)
+                Needed[Section >> 6] |= 1ULL << (Section & 63);
+        }
+    }
+}
+
+// NOTE(nc): a copy of the flight with only the sections that are needed,
+//         : all of them unpacked. a section that is not needed has no data
+//         : in the copy. a flight with no packed section that is needed is
+//         : used as it is, from the map.
+INTERNAL FLIParsed
+CLIFlightUnpack(Arena* MemPool, CLIFlight* Flight, u64 const* Needed)
+{
+    FLIParsed* Src = &Flight->FLI;
+    FLIParsed Result = *Src;
+    FLIHeader* SrcHeader = (FLIHeader*) Src->RawData;
+    u64 TableSize = sizeof(FLISection) * Src->SectionsCount;
+    u64 HeadSize = ALIGNTO(SrcHeader->DataSectionOffset + TableSize, 8);
+    u64 Size = HeadSize;
+    b32 HasPacked = FALSE;
+
+    for (u64 Index = 0; Index < Src->SectionsCount; ++Index) {
+        FLISection* S = &Src->Sections[Index];
+
+        if (!FLVMaskBit(Needed, Index))
+            continue;
+
+        Size += ALIGNTO(S->UnpackedSize, 8);
+        HasPacked |= (S->Encoding == FLI_SECTION_ENCODING_LZB);
+    }
+
+    if (HasPacked) {
+        u8* Data = (u8*) ArenaPushSize(
+            MemPool,
+            Size,
+            NC_SIMD_ALIGN256,
+            FALSE
+        );
+        FLISection* Sections = (FLISection*) (
+            Data + SrcHeader->DataSectionOffset
+        );
+        u64 Offset = HeadSize;
+
+        MemCpy(Data, Src->RawData, SrcHeader->DataSectionOffset);
+        MemCpy(Sections, Src->Sections, TableSize);
+
+        for (u64 Index = 0; Index < Src->SectionsCount; ++Index) {
+            FLISection* S = &Src->Sections[Index];
+            FLISection* D = &Sections[Index];
+
+            D->Encoding = FLI_SECTION_ENCODING_UNPACKED;
+
+            if (!FLVMaskBit(Needed, Index)) {
+                D->Offset = 0;
+                D->EncodedSize = 0;
+                D->UnpackedSize = 0;
+                continue;
+            }
+
+            D->Offset = Offset;
+            D->EncodedSize = S->UnpackedSize;
+
+            if (S->Encoding == FLI_SECTION_ENCODING_LZB) {
+                rr_lzb_simple_decode(
+                    Src->RawData + S->Offset,
+                    S->EncodedSize,
+                    Data + Offset,
+                    S->UnpackedSize
+                );
+            } else {
+                MemCpy(
+                    Data + Offset,
+                    Src->RawData + S->Offset,
+                    S->EncodedSize
+                );
+            }
+
+            Offset += ALIGNTO(S->UnpackedSize, 8);
+        }
+
+        FLIParse(Data, Size, &Result);
+    }
+
+    return Result;
+}
+
 // NOTE(nc): a lane takes one flight. it looks first at which programs are
 //         : fresh, and a flight with none to run is not unpacked. the arena
 //         : goes back to where it was after the flight.
 INTERNAL void
 CLIRunFlights(Arena* MemPool)
 {
+    // NOTE(nc): the run has its own arena, as it has in the app. the
+    //         : results go to the arena of the lane.
+    Arena* RunMemPool = ArenaAlloc();
     u8* Chunk = ArenaPushArray(MemPool, u8, FLAP_EXPORT_CHUNK_SIZE);
 
     for (;;) {
@@ -1134,40 +1270,89 @@ CLIRunFlights(Arena* MemPool)
             continue;
         }
 
-        FLIParsed FLI = Flight->FLI;
-        u64 Size = FLIDecompressedSizeFromParsed(&Flight->FLI);
+        // NOTE(nc): the slots are bound on the flight as it is mapped. the
+        //         : columns they name are the sections to unpack.
+        FLVBoundSlot** Bounds = ArenaPushArrayZero(
+            MemPool,
+            FLVBoundSlot*,
+            CLI_SHARED->ScriptsCount
+        );
+        u64* Needed = ArenaPushArrayZero(
+            MemPool,
+            u64,
+            FLVSeriesWordCount(Flight->FLI.SectionsCount)
+        );
+        u64 ScriptIndex = 0;
 
-        if (Size > Flight->FLI.RawDataSize) {
-            // NOTE(nc): the unpack puts every section on 8 bytes, and the
-            //         : size does not count that
-            Size += 8 * (Flight->FLI.SectionsCount + 1);
-
-            u8* Data = (u8*) ArenaPushSize(
-                MemPool,
-                Size,
-                NC_SIMD_ALIGN256,
-                FALSE
-            );
-
-            FLIDecompressParsed(Data, Size, &Flight->FLI);
-            FLIParse(Data, Size, &FLI);
+        for (
+            u64 Section = 0;
+            Section < MIN(FLI_SECTION_KIND_COUNT, Flight->FLI.SectionsCount);
+            ++Section
+        ) {
+            Needed[Section >> 6] |= 1ULL << (Section & 63);
         }
 
         Slot = 0;
 
-        for (CLIScript* S = CLI_SHARED->HeadScript; S; S = S->Next) {
+        for (
+            CLIScript* S = CLI_SHARED->HeadScript;
+            S;
+            S = S->Next, ++ScriptIndex
+        ) {
+            FLVUnit* Unit = S->Unit;
+            b32 HasStale = FALSE;
+
+            if (!Unit || Unit->HasError)
+                continue;
+
+            for (
+                u32 Program = 0;
+                Program < Unit->Lowered.ProgramCount;
+                ++Program, ++Slot
+            ) {
+                HasStale |= !IsFresh[Slot];
+            }
+
+            if (!HasStale)
+                continue;
+
+            Bounds[ScriptIndex] = FLVBindSlots(
+                MemPool,
+                &Flight->FLI,
+                Unit->Slots,
+                Unit->SlotNames,
+                Unit->SlotsCount
+            );
+            CLIMarkSections(
+                Needed,
+                &Flight->FLI,
+                Bounds[ScriptIndex],
+                Unit->SlotsCount
+            );
+        }
+
+        FLIParsed FLI = CLIFlightUnpack(MemPool, Flight, Needed);
+
+        Slot = 0;
+        ScriptIndex = 0;
+
+        for (
+            CLIScript* S = CLI_SHARED->HeadScript;
+            S;
+            S = S->Next, ++ScriptIndex
+        ) {
             FLVUnit* Unit = S->Unit;
 
             if (!Unit || Unit->HasError)
                 continue;
 
-            FLVBoundSlot* Bound = FLVBindSlots(
-                MemPool,
-                &FLI,
-                Unit->Slots,
-                Unit->SlotNames,
-                Unit->SlotsCount
-            );
+            FLVBoundSlot* Bound = Bounds[ScriptIndex];
+
+            // NOTE(nc): no slots were bound, so all its programs are fresh
+            if (!Bound) {
+                Slot += Unit->Lowered.ProgramCount;
+                continue;
+            }
 
             for (
                 u32 Program = 0;
@@ -1186,7 +1371,7 @@ CLIRunFlights(Arena* MemPool)
                 FLVLaneInit(
                     &Lane,
                     Acc,
-                    MemPool,
+                    RunMemPool,
                     MemPool,
                     P,
                     Flight->Key,
@@ -1240,11 +1425,14 @@ CLIRunFlights(Arena* MemPool)
 
                 AccessClose(Acc);
                 ArenaPopTo(MemPool, Position);
+                ArenaClear(RunMemPool);
             }
         }
 
         ArenaPopTo(MemPool, FlightPosition);
     }
+
+    ArenaRelease(RunMemPool);
 }
 
 void

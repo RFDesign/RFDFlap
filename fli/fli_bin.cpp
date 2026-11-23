@@ -920,6 +920,7 @@ B2FConvert(Arena* MemPool, B2FConvertParams* Params)
                 );
 
                 Format->MessageType = MessageType;
+                MessageType->InstanceField = 0;
                 MessageType->ID = Format->Type;
                 MessageType->Length = Format->Length;
                 MessageType->Name = Format->Name;

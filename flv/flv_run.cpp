@@ -125,7 +125,7 @@ FLVLaneInit(
         Program->EmitCount
     );
 
-    for (u32 Index = 0; Index < Program->EmitCount; ++Index) {
+    for (u32 Index = 0; Index < Program->EmitCount; ) {
         FLVEmit const* Emit = &Program->Emits[Index];
         u32 Head = Index;
 
@@ -161,8 +161,11 @@ FLVLaneInit(
     for (u32 Index = 0; Index < SlotsCount; ++Index) {
         FLVBoundSlot const* Slot = &Slots[Index];
 
-        if (Slot->IsMissing)
+        if (Slot->IsMissing) {
+            Lane->Columns[Index].IsMissing = TRUE;
+
             continue;
+        }
 
         if (Slot->TimeColumn != FLV_COLUMN_NONE) {
             Result &= FLVColumnInit(
