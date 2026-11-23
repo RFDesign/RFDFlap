@@ -245,11 +245,15 @@ MainThreadBaseEntryPoint(int ArgC, char** ArgV)
     CInit();
     FSInit();
     // EditInit();
+
+#if !defined(NC_CLI)
     GraphicsInit();
     RendInit(&CLI);
     FontProviderInit();
     FontInit();
     UIInit();
+#endif
+
     FLIInit(&CLI);
 
     Handle* AsyncThreads = NULL;
@@ -266,6 +270,10 @@ MainThreadBaseEntryPoint(int ArgC, char** ArgV)
         AsyncThreadsCount = U64FromStr(AsyncThreadsCountString);
 
     AsyncThreadsCount = MAX(1, AsyncThreadsCount);
+
+#if defined(NC_CLI)
+    AsyncThreadsCount = 1;
+#endif
 
     Handle Barrier = BarrierAlloc(AsyncThreadsCount);
     LaneContext* LaneCtxs = ArenaPushArrayZero(

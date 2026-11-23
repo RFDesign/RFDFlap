@@ -26,12 +26,10 @@
 #include "flap_export.h"
 #include "flap_views.h"
 
+#include "cli_main.h"
+
 #include "fli.cpp"
 #include "fli_bin.cpp"
-
-#if defined(NC_FLI)
-    #include "fli_main.cpp"
-#endif
 
 #include "flv_intern.cpp"
 #include "flv_token.cpp"
@@ -56,6 +54,14 @@
 #include "flap_export_csv.cpp"
 #include "flap_export_txt.cpp"
 #include "flap_views.cpp"
+
+#if defined(NC_FLI)
+    #include "fli_main.cpp"
+#endif
+
+#if defined(NC_CLI)
+    #include "cli_main.cpp"
+#endif
 
 #define FLAP_MAX_LANE_COUNT 256
 
@@ -3621,7 +3627,8 @@ EntryPoint(CommandLine* CLI)
 #if defined(NC_FLI)
     FLIEntryPoint(CLI);
 #elif defined(NC_CLI)
-    PrintOut("Hello, World!\n");
+    FLVCompilerInit();
+    CLIEntryPoint(CLI);
 #else
     // SockInit();
     // HTTPInit();

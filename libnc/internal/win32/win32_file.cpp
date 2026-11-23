@@ -644,7 +644,13 @@ SystemMoveFile(Str8 DstPath, Str8 FilePath)
     Str16 DstPathWide = Str16FromStr8(Scratch.MemPool, DstPath);
     Str16 FilePathWide = Str16FromStr8(Scratch.MemPool, FilePath);
 
-    Result = CopyFileW((WCHAR*) FilePathWide.Str, (WCHAR*) DstPathWide.Str, FALSE);
+    // NOTE(nc): a file that is at the new path is replaced, as rename
+    //         : does on Linux. the copy is for a move to another drive.
+    Result = MoveFileExW(
+        (WCHAR*) FilePathWide.Str, 
+        (WCHAR*) DstPathWide.Str, 
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED
+    );
     ReleaseScratch(Scratch);
 
     return Result;

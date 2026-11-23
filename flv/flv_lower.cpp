@@ -1791,6 +1791,8 @@ EmitMissing(LowerState* State, u8 DisplayKind, Str8 Label)
 internal void
 LowerGraph(LowerState* State, ASTNodeDisplay* Display)
 {
+    ++State->TableGroup;
+
     for (u32 Index = 0; Index < Display->Header.Count; ++Index) {
         ASTDisplayArg* Arg = &Display->Arg[Index];
         TypeIndex Type = TypeOf(State, Arg->Expr);
@@ -1980,6 +1982,8 @@ LowerTable(LowerState* State, ASTNodeDisplay* Display)
 internal void
 LowerFlag(LowerState* State, ASTNodeDisplay* Display)
 {
+    ++State->TableGroup;
+
     ASTDisplayArg* Cond = &Display->Arg[0];
     Str8 Label = ArgLabel(State, Cond);
     TypeIndex CondType = TypeOf(State, Cond->Expr);
