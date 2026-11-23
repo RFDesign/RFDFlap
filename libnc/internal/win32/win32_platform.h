@@ -343,6 +343,9 @@
 #define GENERIC_EXECUTE                             0x20000000L
 #define GENERIC_ALL                                 0x10000000L
 
+#define MOVEFILE_REPLACE_EXISTING                   0x00000001L
+#define MOVEFILE_COPY_ALLOWED                       0x00000002L
+
 #define FIND_FIRST_EX_CASE_SENSITIVE                1
 #define FIND_FIRST_EX_LARGE_FETCH                   2
 #define FIND_FIRST_EX_ON_DISK_ENTRIES_ONLY          4
@@ -3367,6 +3370,7 @@ DLL_IMPORT                    BOOL                              WinHttpCloseHand
 DLL_IMPORT                    MMRESULT                     WINAPI  timeBeginPeriod(UINT uPeriod);
 DLL_IMPORT                    MMRESULT                     WINAPI  timeEndPeriod(UINT uPeriod);
 DLL_IMPORT                    BOOL                         WINAPI  SystemTimeToTzSpecificLocalTime(LPCVOID lpTimeZoneInformation, SYSTEMTIME const* lpUniversalTime, LPSYSTEMTIME lpLocalTime);
+DLL_IMPORT                    BOOL                         WINAPI  MoveFileExW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName, DWORD dwFlags);
 EXTERN_C_LINK_END
 
 // @runtime____________________________________________________________________
