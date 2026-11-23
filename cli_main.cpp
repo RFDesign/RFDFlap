@@ -5,6 +5,8 @@
 #include "nc_sync.h"
 #include "nc_simd.h"
 #include "nc_sort.h"
+#include "fonts/nc_fonts.h"
+#include "nc_font_provider.h"
 
 #include "fli.h"
 #include "fli_bin.h"
@@ -13,6 +15,7 @@
 #include "flv_bind.h"
 #include "flv_compile.h"
 #include "flv_run.h"
+#include "flv_stdlib.h"
 #include "flv_token.h"
 
 #include "cli_main.h"
@@ -1002,6 +1005,114 @@ CLIExportTable(
     return Result;
 }
 
+// NOTE(nc): the flags and the modes of the draw data, as FLAPGraph has
+//         : them, each for its switch. the flags are all the flags of the
+//         : program, since a graph directive has none of its own. a flag
+//         : takes its colour from the far end of the colours of the
+//         : curves, and it is in the legend after the curves.
+INTERNAL void
+CLIGraphFlagsAndModes(
+    Arena* MemPool,
+    FLIParsed* FLI,
+    FLVProgram const* P,
+    FLVRenderItem* Items,
+    FLAPGraphDrawData* Data
+) {
+    if (CLI_SHARED->HasGraphFlags) {
+        Data->Flags = ArenaPushArrayZero(
+            MemPool,
+            FLVRenderFlag const*,
+            P->EmitCount
+        );
+        Data->FlagColours = ArenaPushArrayZero(
+            MemPool,
+            v4f32,
+            P->EmitCount
+        );
+
+        for (u32 Index = 0; Index < P->EmitCount; ++Index) {
+            if (
+                P->Emits[Index].DisplayKind != TOKEN_KIND_FLAG ||
+                Items[Index].IsMissing ||
+                Items[Index].Kind != FLV_RENDER_KIND_FLAG
+            ) {
+                continue;
+            }
+
+            FLAPGraphDrawLabel* Label = &Data->Labels[Data->LabelsCount++];
+            v4f32 Colour = FLAPRasterVecFromColour(
+                FLAP_RASTER_CURVE_COLOUR_TABLE[
+                    (FLAP_RASTER_CURVE_COLOURS - 1) -
+                    (Data->FlagsCount % FLAP_RASTER_CURVE_COLOURS)
+                ]
+            );
+
+            Data->Flags[Data->FlagsCount] = &Items[Index].Flag;
+            Data->FlagColours[Data->FlagsCount] = Colour;
+            Label->String = P->Strings[P->Emits[Index].LabelStringIndex];
+            Label->Colour = Colour;
+            ++Data->FlagsCount;
+        }
+    }
+
+    // NOTE(nc): the mode records of the flight, and the table of mode
+    //         : names of its vehicle
+    if (CLI_SHARED->HasGraphModes) {
+        u64 ModesCount = 0;
+        u64 InfoCount = 0;
+        FLIMode* ModeTable = FLITableFromName(
+            FLI,
+            Modes,
+            MODES,
+            &ModesCount
+        );
+        FLIFileInfo* Infos = FLITableFromName(
+            FLI,
+            FileInfo,
+            FILE_INFO,
+            &InfoCount
+        );
+        FLVVehicleKind VehicleKind = FLV_VEHICLE_KIND_UNKNOWN;
+        v4f32* ModeColours = ArenaPushArrayZero(
+            MemPool,
+            v4f32,
+            FLAP_GRAPH_MODE_COLOURS
+        );
+
+        for (u32 Index = 0; Index < FLAP_GRAPH_MODE_COLOURS; ++Index) {
+            ModeColours[Index] = FLAPRasterVecFromColour(
+                FLAP_RASTER_CURVE_COLOUR_TABLE[
+                    Index % FLAP_RASTER_CURVE_COLOURS
+                ]
+            );
+        }
+
+        if (InfoCount) {
+            u64 Length = 0;
+            u8* Base = FLIStrFromIndex(
+                FLI,
+                Infos[InfoCount - 1].VehicleStringIndex,
+                &Length
+            );
+
+            VehicleKind = FLVVehicleKindFromStr(Str(Base, Length));
+        }
+
+        if (VehicleKind < FLV_VEHICLE_KIND_COUNT) {
+            Data->ModeNames = FLV_MODE_TABLE[VehicleKind];
+            Data->ModeNamesCount = FLV_MODE_TABLE_COUNT[VehicleKind];
+        }
+
+        // NOTE(nc): the first element of a table of the FLI is its null
+        if (ModesCount > 1) {
+            Data->Modes = ModeTable + 1;
+            Data->ModesCount = (u32) (ModesCount - 1);
+        }
+
+        Data->ModeColours = ModeColours;
+    }
+}
+
 // NOTE(nc): the draw data of the graph of one directive, as FLAPGraph
 //         : makes it for its box. the time range is the fit of the curves
 //         : and the value axes are the fit of the data in it. there is no
@@ -1040,9 +1151,10 @@ CLIGraphDataFromDirective(
     Data->Labels = ArenaPushArrayZero(
         MemPool,
         FLAPGraphDrawLabel,
-        Tail - Head
+        (Tail - Head) + P->EmitCount
     );
     Data->Metrics = Metrics;
+    Data->LabelColour = FLAPRasterVecFromColour(FLAP_RASTER_COLOUR_LABEL);
     Fit.Min = U64_MAX;
 
     // NOTE(nc): the columns are waited for here, so the reduce finds them
@@ -1130,6 +1242,7 @@ CLIGraphDataFromDirective(
                 "%S (missing)",
                 PRINT_STR(Name)
             );
+            Label->Colour = Data->LabelColour;
             continue;
         }
 
@@ -1156,6 +1269,12 @@ CLIGraphDataFromDirective(
         Curve->Columns = Columns;
         Curve->Name = Name;
         Curve->Axis = (Key.Curve->Axis == 2);
+        Curve->Colour = FLAPRasterVecFromColour(
+            FLAP_RASTER_CURVE_COLOUR_TABLE[
+                Data->CurvesCount % FLAP_RASTER_CURVE_COLOURS
+            ]
+        );
+        Label->Colour = Curve->Colour;
         Curve->Samples = FLAPGraphFitValueRange(
             Columns,
             View,
@@ -1171,6 +1290,8 @@ CLIGraphDataFromDirective(
         );
         ++Data->CurvesCount;
     }
+
+    CLIGraphFlagsAndModes(MemPool, FLI, P, Items, Data);
 
     for (u32 Axis = 0; Axis < 2; ++Axis) {
         if (Data->ValueRanges[Axis].Max <= Data->ValueRanges[Axis].Min) {
@@ -1515,6 +1636,276 @@ CLIGraphGrid(
     }
 }
 
+// NOTE(nc): the glyphs of the labels, made one time by the first lane
+//         : before the lanes draw. the font is the main font of the app,
+//         : from its bytes in the binary, or the file that was given.
+//         : with no font the graphs are written with no text.
+INTERNAL void
+CLIGraphFontInit(void)
+{
+    FontProviderInit();
+
+    // NOTE(nc): the provider keeps the pointer to the bytes, and they are
+    //         : in the binary, so they are there for as long as the font
+    FPHandle Handle = CLI_SHARED->GraphFontPath.Size
+        ? OpenFont(CLI_SHARED->GraphFontPath)
+        : FontOpen((Str8*) &APP_DEFAULT_MAIN_FONT_BYTES);
+
+    if (Handle != EMPTY_FPHANDLE_VALUE) {
+        CLI_SHARED->GraphFont = FLAPRasterFontFromHandle(
+            CLI_SHARED->MemPool,
+            Handle,
+            CLI_GRAPH_FONT_SIZE
+        );
+        CloseFont(Handle);
+    } else {
+        PrintErr("the font was not opened, so the graphs have no text\n");
+    }
+}
+
+// NOTE(nc): the legend, the value labels and the time labels, where
+//         : FLAPGraphDraw has them. the box of the app is the image here.
+//         : the time is from the start of the file.
+INTERNAL void
+CLIGraphLabels(
+    Arena* MemPool,
+    FLAPRasterImage* Image,
+    FLAPRasterFont const* Font,
+    FLAPGraphDrawData const* Data,
+    CLIGraphTicks const* Ticks,
+    r2i32 Plot
+) {
+    f32 FontSize = Font->Size;
+    u32 LabelPixel = FLAPGraphMinimapPixel(Data->LabelColour);
+    f32 LegendX = FontSize;
+
+    for (
+        u32 Index = 0;
+        Index < Data->LabelsCount && LegendX < (f32) Image->Width;
+        ++Index
+    ) {
+        FLAPGraphDrawLabel* Label = &Data->Labels[Index];
+
+        FLAPRasterText(
+            Image,
+            Font,
+            Vec(LegendX, 0.0f),
+            Label->String,
+            FLAPGraphMinimapPixel(Label->Colour)
+        );
+        LegendX += (
+            FLAPRasterTextWidth(Font, Label->String) + 2.0f * FontSize
+        );
+    }
+
+    // NOTE(nc): value labels, left axis then right axis
+    for (u32 Axis = 0; Axis < 2; ++Axis) {
+        f32 ValueStep = Ticks->ValueSteps[Axis];
+
+        if (ValueStep <= 0.0f)
+            continue;
+
+        r1f32 Range = Data->ValueRanges[Axis];
+        f32 Scale = (f32) (Data->Height - 1) / (Range.Max - Range.Min);
+        char* Fmt = (char*) (
+            (ValueStep >= 0.95f)
+                ? "%.0f"
+                : (ValueStep >= 0.095f)
+                    ? "%.1f"
+                    : (ValueStep >= 0.0095f)
+                        ? "%.2f"
+                        : "%.3f"
+        );
+
+        for (u32 Tick = 0; ; ++Tick) {
+            f32 Value = (Ticks->ValueFirsts[Axis] + (f32) Tick) * ValueStep;
+
+            if (Value > Range.Max)
+                break;
+
+            Str8 String = ArenaPushStrFmt(MemPool, Fmt, (f64) Value);
+            f32 X = Axis
+                ? (f32) Plot.X1 + FontSize
+                : (f32) Plot.X0 - FontSize - FLAPRasterTextWidth(Font, String);
+            f32 Y = (
+                (f32) Plot.Y0 +
+                (Range.Max - Value) * Scale -
+                0.5f * FontSize
+            );
+
+            FLAPRasterText(Image, Font, Vec(X, Y), String, LabelPixel);
+        }
+    }
+
+    if (Ticks->TimeStepUSecs) {
+        r1u64 ViewRange = Data->TimeRangeUSecs;
+        f64 PXPerUSec = (f64) Data->Width / (f64) Length(ViewRange);
+
+        for (
+            u64 TimeUSecs = Ticks->TimeFirstUSecs;
+            TimeUSecs < ViewRange.Max;
+            TimeUSecs += Ticks->TimeStepUSecs
+        ) {
+            f32 X = FloorF32(
+                (f32) Plot.X0 + (f32) (
+                    (f64) (TimeUSecs - ViewRange.Min) * PXPerUSec
+                )
+            );
+
+            FLAPRasterText(
+                Image,
+                Font,
+                Vec(X, (f32) Plot.Y1),
+                FLAPGraphStrFromTime(
+                    MemPool,
+                    NULL,
+                    TimeUSecs,
+                    Ticks->TimeDigits,
+                    FALSE
+                ),
+                LabelPixel
+            );
+        }
+    }
+}
+
+// NOTE(nc): the modes and the flags, where FLAPGraphDraw has them. a mode
+//         : is a tint of the plot from its record to the next one, with
+//         : its name at the top of a span that has the room for it. a flag
+//         : is a lane at the bottom edge of the plot, the first flag at
+//         : the bottom. both are drawn before the curves. with no font
+//         : the modes have no names.
+INTERNAL void
+CLIGraphModesAndFlags(
+    Arena* MemPool,
+    FLAPRasterImage* Image,
+    FLAPRasterFont const* Font,
+    FLAPGraphDrawData const* Data,
+    r2i32 Plot
+) {
+    r1u64 ViewRange = Data->TimeRangeUSecs;
+    u32 Width = Data->Width;
+    f64 PXPerUSec = (f64) Width / (f64) Length(ViewRange);
+    u32 LabelPixel = FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_LABEL);
+
+    for (u32 Index = 0; Index < Data->ModesCount; ++Index) {
+        u64 Start = Data->Modes[Index].TimeUSecs;
+        u64 End = (Index + 1 < Data->ModesCount)
+            ? Data->Modes[Index + 1].TimeUSecs
+            : U64_MAX;
+
+        if (End <= ViewRange.Min)
+            continue;
+
+        if (Start >= ViewRange.Max)
+            break;
+
+        i32 SpanX0 = Plot.X0 + (i32) (
+            (f64) (MAX(Start, ViewRange.Min) - ViewRange.Min) * PXPerUSec
+        );
+        i32 SpanX1 = Plot.X0 + (i32) (
+            (f64) (MIN(End, ViewRange.Max) - ViewRange.Min) * PXPerUSec
+        );
+        u32 Number = Data->Modes[Index].Mode;
+        v4f32 Colour = Data->ModeColours[Number % FLAP_GRAPH_MODE_COLOURS];
+
+        FLAPRasterBlend(
+            Image,
+            Rng(SpanX0, Plot.Y0, SpanX1, Plot.Y1),
+            FLAPGraphMinimapPixel(Colour),
+            0.15f * Colour.W
+        );
+
+        if (!Font)
+            continue;
+
+        Str8 Name = FLAPGraphModeName(
+            MemPool,
+            Data->ModeNames,
+            Data->ModeNamesCount,
+            Number
+        );
+        f32 NameWidth = FLAPRasterTextWidth(Font, Name);
+
+        if ((f32) (SpanX1 - SpanX0) >= NameWidth + Font->Size) {
+            FLAPRasterText(
+                Image,
+                Font,
+                Vec((f32) SpanX0 + 0.5f * Font->Size, (f32) Plot.Y0),
+                Name,
+                LabelPixel
+            );
+        }
+    }
+
+    // NOTE(nc): the ranges of a flag that share a pixel are one rect
+    if (Data->FlagsCount) {
+        u8* Bands = ArenaPushArray(MemPool, u8, Width);
+        i32 Lane = (i32) MAX(3.0f, FloorF32(0.4f * CLI_GRAPH_FONT_SIZE));
+
+        for (u32 FlagIndex = 0; FlagIndex < Data->FlagsCount; ++FlagIndex) {
+            FLVRenderFlag const* Flag = Data->Flags[FlagIndex];
+            i32 LaneY1 = Plot.Y1 - (i32) FlagIndex * Lane;
+            u32 Pixel = FLAPGraphMinimapPixel(Data->FlagColours[FlagIndex]);
+
+            // NOTE(nc): no room for more lanes
+            if (LaneY1 - Lane < Plot.Y0)
+                break;
+
+            MemZero(Bands, Width);
+
+            for (u64 Index = 0; Index < Flag->Count; ++Index) {
+                r1u64 Range = Flag->Ranges[Index];
+
+                if (Range.Max <= ViewRange.Min || Range.Min >= ViewRange.Max)
+                    continue;
+
+                u32 First = MIN(
+                    (u32) (
+                        (f64) (
+                            MAX(Range.Min, ViewRange.Min) - ViewRange.Min
+                        ) * PXPerUSec
+                    ),
+                    Width - 1
+                );
+                u32 Last = MIN(
+                    (u32) (
+                        (f64) (
+                            MIN(Range.Max, ViewRange.Max) - 1 - ViewRange.Min
+                        ) * PXPerUSec
+                    ),
+                    Width - 1
+                );
+
+                for (u32 Band = First; Band <= Last; ++Band)
+                    Bands[Band] = 1;
+            }
+
+            for (u32 Band = 0; Band < Width; ) {
+                if (!Bands[Band]) {
+                    ++Band;
+                    continue;
+                }
+
+                u32 Start = Band;
+
+                for ( ; Band < Width && Bands[Band]; ++Band);
+
+                FLAPRasterFill(
+                    Image,
+                    Rng(
+                        Plot.X0 + (i32) Start,
+                        LaneY1 - Lane,
+                        Plot.X0 + (i32) Band,
+                        LaneY1
+                    ),
+                    Pixel
+                );
+            }
+        }
+    }
+}
+
 // NOTE(nc): the graph as a picture: the background, the plot, and each
 //         : curve as a mask that is blended over them in its colour.
 INTERNAL b32
@@ -1572,6 +1963,16 @@ CLIExportGraphImage(
     if (HasPlot && CLI_SHARED->HasGraphGrid)
         CLIGraphGrid(Image, &Data, &Ticks, Plot);
 
+    if (HasPlot) {
+        CLIGraphModesAndFlags(
+            MemPool,
+            Image,
+            CLI_SHARED->GraphFont,
+            &Data,
+            Plot
+        );
+    }
+
     // NOTE(nc): the mask is the plot, so a curve is cut at its edges
     Mask->Width = Data.Width;
     Mask->Height = Data.Height;
@@ -1592,6 +1993,17 @@ CLIExportGraphImage(
                     CurveIndex % FLAP_RASTER_CURVE_COLOURS
                 ]
             )
+        );
+    }
+
+    if (CLI_SHARED->GraphFont) {
+        CLIGraphLabels(
+            MemPool,
+            Image,
+            CLI_SHARED->GraphFont,
+            &Data,
+            &Ticks,
+            Plot
         );
     }
 
@@ -2050,6 +2462,9 @@ CLIThreadEntryPoint(void* __Params)
         if (!LaneIndex()) {
             CLICompileScripts();
 
+            if (!CLI_SHARED->IsGraphCSV)
+                CLIGraphFontInit();
+
             if (
                 CLI_SHARED->OutputPath.Size &&
                 !SystemDirExists(CLI_SHARED->OutputPath)
@@ -2102,6 +2517,12 @@ CLIEntryPoint(CommandLine* CLI)
             "--graph_height:<n>  The height of a graph image, in pixels.\n\n"
             "--graph_csv         A graph is written as CSV and not as PNG.\n\n"
             "--graph_grid        A graph image has a line at each tick.\n\n"
+            "--graph_font:<file> The font of the text of a graph image. It\n"
+            "                    is the font of the app when this is not given.\n\n"
+            "--graph_modes       A graph image has the flight modes as a\n"
+            "                    tint of its plot.\n\n"
+            "--graph_flags       A graph image has the flags of its program\n"
+            "                    as lanes at the bottom of its plot.\n"
         );
 
         return;
@@ -2152,6 +2573,9 @@ CLIEntryPoint(CommandLine* CLI)
     CLI_SHARED->DoCompress = !CommandLineHasFlag(CLI, "no_compress"_s8);
     CLI_SHARED->IsGraphCSV = CommandLineHasFlag(CLI, "graph_csv"_s8);
     CLI_SHARED->HasGraphGrid = CommandLineHasFlag(CLI, "graph_grid"_s8);
+    CLI_SHARED->HasGraphModes = CommandLineHasFlag(CLI, "graph_modes"_s8);
+    CLI_SHARED->HasGraphFlags = CommandLineHasFlag(CLI, "graph_flags"_s8);
+    CLI_SHARED->GraphFontPath = CommandLineString(CLI, "graph_font"_s8);
     CLI_SHARED->GraphSize = Vec(
         (i32) CLI_GRAPH_WIDTH,
         (i32) CLI_GRAPH_HEIGHT

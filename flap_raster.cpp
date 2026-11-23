@@ -1,6 +1,6 @@
-#include "nc_arena.h"
-#include "nc_memory.h"
 #include "nc_simd.h"
+#include "nc_string.h"
+#include "nc_font_provider.h"
 
 #include "flap_raster.h"
 
@@ -559,6 +559,253 @@ FLAPRasterBlendMask(
                 );
 
                 _mm256_maskstore_epi32((int*) Dst, Live, Out);
+            }
+        }
+    }
+}
+
+struct FLAPRasterSource {
+    v256f Red;
+    v256f Green;
+    v256f Blue;
+};
+
+INTERNAL FLAPRasterSource
+FLAPRasterSourceFromPixel(u32 Pixel)
+{
+    FLAPRasterSource Result = {};
+    f32 Red = (f32) (Pixel & 0xFF);
+    f32 Green = (f32) ((Pixel >> 8) & 0xFF);
+    f32 Blue = (f32) ((Pixel >> 16) & 0xFF);
+
+    Result.Red = _mm256_set1_ps(Red * Red);
+    Result.Green = _mm256_set1_ps(Green * Green);
+    Result.Blue = _mm256_set1_ps(Blue * Blue);
+
+    return Result;
+}
+
+// NOTE(nc): the source over 8 pixels, with a coverage from 0 to 255 for
+//         : each. a pixel with no coverage is not read and is not written,
+//         : so the 8 can go past the end of a row.
+INTERNAL void
+FLAPRasterBlendLanes(u32* Dst, FLAPRasterSource const* Source, v256 Cover)
+{
+    v256 Live = _mm256_cmpgt_epi32(Cover, _mm256_setzero_si256());
+
+    if (_mm256_testz_si256(Live, Live))
+        return;
+
+    v256 ByteMask = _mm256_set1_epi32(0xFF);
+    v256f Alpha = _mm256_mul_ps(
+        _mm256_cvtepi32_ps(Cover),
+        _mm256_set1_ps(1.0f / 255.0f)
+    );
+    v256 Pixels = _mm256_maskload_epi32((int const*) Dst, Live);
+    v256 OutRed = FLAPRasterBlendChannel(
+        _mm256_and_si256(Pixels, ByteMask),
+        Source->Red,
+        Alpha
+    );
+    v256 OutGreen = FLAPRasterBlendChannel(
+        _mm256_and_si256(_mm256_srli_epi32(Pixels, 8), ByteMask),
+        Source->Green,
+        Alpha
+    );
+    v256 OutBlue = FLAPRasterBlendChannel(
+        _mm256_and_si256(_mm256_srli_epi32(Pixels, 16), ByteMask),
+        Source->Blue,
+        Alpha
+    );
+    v256 Out = _mm256_or_si256(
+        _mm256_or_si256(OutRed, _mm256_slli_epi32(OutGreen, 8)),
+        _mm256_or_si256(
+            _mm256_slli_epi32(OutBlue, 16),
+            _mm256_set1_epi32((i32) 0xFF000000)
+        )
+    );
+
+    _mm256_maskstore_epi32((int*) Dst, Live, Out);
+}
+
+// NOTE(nc): a colour of a theme as the draw data of a graph has it. the
+//         : pixel of it is FLAPGraphMinimapPixel.
+INTERNAL v4f32
+FLAPRasterVecFromColour(u32 Colour)
+{
+    v4f32 Result = Vec(
+        (f32) ((Colour >> 24) & 0xFF) / 255.0f,
+        (f32) ((Colour >> 16) & 0xFF) / 255.0f,
+        (f32) ((Colour >> 8) & 0xFF) / 255.0f,
+        (f32) (Colour & 0xFF) / 255.0f
+    );
+
+    return Result;
+}
+
+// NOTE(nc): the provider is called here and nowhere else, one time for
+//         : each glyph, so this is for one thread before the lanes draw.
+//         : the ascent and the descent are as FontMetricsFromTagSize has
+//         : them. a glyph has 8 bytes after its coverage, so a read of 8
+//         : lanes at its end is in its memory.
+INTERNAL FLAPRasterFont*
+FLAPRasterFontFromHandle(Arena* MemPool, FPHandle Handle, f32 Size)
+{
+    TempArena Scratch = GetScratch(&MemPool, 1);
+    FLAPRasterFont* Result = ArenaPushArrayZero(MemPool, FLAPRasterFont, 1);
+    FPMetrics Metrics = MetricsFromFont(Handle);
+    f32 SizeFloored = FloorF32(Size);
+
+    Result->Size = Size;
+
+    if (Metrics.DesignUnitsPerEM > 0.0f) {
+        Result->Ascent = (
+            SizeFloored * Metrics.Ascent / Metrics.DesignUnitsPerEM
+        );
+        Result->Descent = (
+            SizeFloored * Metrics.Descent / Metrics.DesignUnitsPerEM
+        );
+    }
+
+    for (u32 Index = 0; Index < FLAP_RASTER_GLYPH_COUNT; ++Index) {
+        FLAPRasterGlyph* Glyph = &Result->Glyphs[Index];
+        u64 Position = ArenaGetPosition(Scratch.MemPool);
+        u8 Byte = (u8) (FLAP_RASTER_GLYPH_FIRST + Index);
+        FPRasterResult Raw = Raster(
+            Scratch.MemPool,
+            Handle,
+            SizeFloored,
+            FP_RASTER_KIND_SMOOTH | FP_RASTER_KIND_HINTED,
+            Str(&Byte, 1)
+        );
+
+        Glyph->Advance = Raw.Advance;
+
+        if (
+            Raw.Atlas &&
+            Raw.AtlasDimensions.X > 0 &&
+            Raw.AtlasDimensions.Y > 0
+        ) {
+            u64 Count = (
+                (u64) Raw.AtlasDimensions.X * (u64) Raw.AtlasDimensions.Y
+            );
+            u8 const* Atlas = (u8 const*) Raw.Atlas;
+
+            Glyph->Size = Raw.AtlasDimensions;
+            Glyph->Coverage = ArenaPushArrayZero(
+                MemPool,
+                u8,
+                Count + FLAP_RASTER_LANE_WIDTH
+            );
+
+            // NOTE(nc): the atlas is white with the coverage as its alpha
+            for (u64 Pixel = 0; Pixel < Count; ++Pixel)
+                Glyph->Coverage[Pixel] = Atlas[Pixel * 4 + 3];
+        }
+
+        ArenaPopTo(Scratch.MemPool, Position);
+    }
+
+    ReleaseScratch(Scratch);
+
+    return Result;
+}
+
+INTERNAL f32
+FLAPRasterTextWidth(FLAPRasterFont const* Font, Str8 String)
+{
+    f32 Result = 0.0f;
+
+    for (u64 Index = 0; Index < String.Size; ++Index) {
+        u32 Code = String.Str[Index];
+
+        if (
+            Code >= FLAP_RASTER_GLYPH_FIRST &&
+            Code < FLAP_RASTER_GLYPH_FIRST + FLAP_RASTER_GLYPH_COUNT
+        ) {
+            Result += Font->Glyphs[Code - FLAP_RASTER_GLYPH_FIRST].Advance;
+        }
+    }
+
+    return Result;
+}
+
+// NOTE(nc): a line of text, with Position as the top left of it, as
+//         : FLAPGraphText takes it. the baseline is the top and the
+//         : ascent, and the top of a glyph is the ascent and the descent
+//         : above the baseline, as the font cache has it for a piece. a
+//         : byte that the font has no glyph for is not drawn, and a glyph
+//         : that is not all in the image is not drawn.
+INTERNAL void
+FLAPRasterText(
+    FLAPRasterImage* Image,
+    FLAPRasterFont const* Font,
+    v2f32 Position,
+    Str8 String,
+    u32 Pixel
+) {
+    FLAPRasterSource Source = FLAPRasterSourceFromPixel(Pixel);
+    i32 Baseline = (i32) FloorF32(Position.Y + Font->Ascent);
+    i32 Top = Baseline - (i32) (Font->Ascent + Font->Descent);
+    f32 PenX = FloorF32(Position.X);
+
+    for (u64 Index = 0; Index < String.Size; ++Index) {
+        u32 Code = String.Str[Index];
+
+        if (
+            Code < FLAP_RASTER_GLYPH_FIRST ||
+            Code >= FLAP_RASTER_GLYPH_FIRST + FLAP_RASTER_GLYPH_COUNT
+        ) {
+            continue;
+        }
+
+        FLAPRasterGlyph const* Glyph = &Font->Glyphs[
+            Code - FLAP_RASTER_GLYPH_FIRST
+        ];
+        i32 Left = (i32) PenX;
+        i32 Width = (i32) Glyph->Size.X;
+        i32 Height = (i32) Glyph->Size.Y;
+
+        PenX += Glyph->Advance;
+
+        if (
+            !Glyph->Coverage ||
+            Left < 0 ||
+            Top < 0 ||
+            Left + Width > (i32) Image->Width ||
+            Top + Height > (i32) Image->Height
+        ) {
+            continue;
+        }
+
+        for (i32 Y = 0; Y < Height; ++Y) {
+            u8 const* Coverage = Glyph->Coverage + (u64) Y * (u64) Width;
+            u32* Dst = (
+                Image->Pixels +
+                (u64) (Top + Y) * Image->Width +
+                Left
+            );
+
+            for (i32 X = 0; X < Width; X += FLAP_RASTER_LANE_WIDTH) {
+                i32 Count = Width - X;
+                v256 Cover = _mm256_cvtepu8_epi32(
+                    _mm_loadl_epi64((v128 const*) (Coverage + X))
+                );
+
+                // NOTE(nc): the lanes past the end of the row of the
+                //         : glyph are the start of its next row
+                if (Count < FLAP_RASTER_LANE_WIDTH) {
+                    Cover = _mm256_and_si256(
+                        Cover,
+                        _mm256_loadu_si256(
+                            (v256 const*) &FLAP_RASTER_TAIL_MASK_TABLE[
+                                FLAP_RASTER_LANE_WIDTH - Count
+                            ]
+                        )
+                    );
+                }
+
+                FLAPRasterBlendLanes(Dst + X, &Source, Cover);
             }
         }
     }

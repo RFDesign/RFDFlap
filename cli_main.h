@@ -12,6 +12,7 @@
 
 struct Arena;
 struct FLVUnit;
+struct FLAPRasterFont;
 
 // @defines____________________________________________________________________
 #define CLI_FLIGHT_SLOTS_COUNT  4096
@@ -68,31 +69,35 @@ struct CLIGraphTicks {
 };
 
 struct CLIShared {
-    Arena*      MemPool;
-    CLIFlight** FlightSlots;
-    CLIFlight*  HeadFlight;
-    CLIFlight*  TailFlight;
-    u64         FlightsCount;
-    CLIFlight** Flights;
-    CLIScript*  HeadScript;
-    CLIScript*  TailScript;
-    u64         ScriptsCount;
-    Str8        OutputPath;
-    Str8        FLIOutputPath;
-    Str8Array   SearchPaths;
-    u64         FlightTakeCounter;
-    u64         ProgramsCount;
-    u64         ExportedCount;
-    u64         FreshCount;
-    u64         FailCount;
-    u64         ConvertedCount;
-    v2i32       GraphSize;
-    b32         IsRecursive;
-    b32         IsForced;
-    b32         IsDryRun;
-    b32         DoCompress;
-    b32         IsGraphCSV;
-    b32         HasGraphGrid;
+    Arena*          MemPool;
+    CLIFlight**     FlightSlots;
+    CLIFlight*      HeadFlight;
+    CLIFlight*      TailFlight;
+    u64             FlightsCount;
+    CLIFlight**     Flights;
+    CLIScript*      HeadScript;
+    CLIScript*      TailScript;
+    u64             ScriptsCount;
+    Str8            OutputPath;
+    Str8            FLIOutputPath;
+    Str8Array       SearchPaths;
+    Str8            GraphFontPath;
+    FLAPRasterFont* GraphFont;
+    u64             FlightTakeCounter;
+    u64             ProgramsCount;
+    u64             ExportedCount;
+    u64             FreshCount;
+    u64             FailCount;
+    u64             ConvertedCount;
+    v2i32           GraphSize;
+    b32             IsRecursive;
+    b32             IsForced;
+    b32             IsDryRun;
+    b32             DoCompress;
+    b32             IsGraphCSV;
+    b32             HasGraphGrid;
+    b32             HasGraphModes;
+    b32             HasGraphFlags;
 };
 
 // @runtime____________________________________________________________________

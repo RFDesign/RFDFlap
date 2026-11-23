@@ -266,6 +266,9 @@ FLAPGraphMetrics FLAPGraphMetricsFromFontSize(f32 FontSize);
 b32 FLAPGraphEmitIsCurve(FLVProgram const* Program, FLVRenderItem* Items, u32 Index);
 f32 FLAPGraphTickStep(f32 Range, u32 MaxTicks);
 u64 FLAPGraphTickUSecs(u64 SpanUSecs, u32 MaxTicks, b32 IsClock);
+Str8 FLAPGraphStrFromTime(Arena* MemPool, FLAPGraphClock const* Clock, u64 TimeUSecs, u32 Digits, b32 HasDate);
+u32 FLAPGraphMinimapPixel(v4f32 Colour);
+Str8 FLAPGraphModeName(Arena* MemPool, FLVModeName const* Names, u32 Count, u32 Number);
 void FLAPGraph(FLAPGraphParams* Params, r2f32 Rect);
 b32 FLAPTableCtxFromParams(Arena* MemPool, FLAPTableParams* Params, OUT FLAPTableCtx* Ctx);
 
