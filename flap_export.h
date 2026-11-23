@@ -15,6 +15,9 @@ struct FLAPExportWriter;
 
 // @defines____________________________________________________________________
 #define FLAP_EXPORT_CHUNK_SIZE MB(1)
+#define FLAP_EXPORT_ROW_SIZE     64
+#define FLAP_EXPORT_F64_DECIMALS 7
+#define FLAP_EXPORT_F64_SCALE    10000000ULL
 
 typedef u32 FLAPExportKind;
 enum : u32 {
@@ -61,6 +64,14 @@ extern FLAPExportFuncType* FLAP_EXPORT_KIND_FUNC_TABLE[FLAP_EXPORT_KIND_COUNT];
 // @functions__________________________________________________________________
 void FLAPExportFlush(FLAPExportWriter* Writer);
 void FLAPExportWrite(FLAPExportWriter* Writer, Str8 String);
+u8* FLAPExportReserve(FLAPExportWriter* Writer, u64 Size);
+void FLAPExportCommit(FLAPExportWriter* Writer, u8* Ptr);
+u8* FLAPExportPutU64(u8* Ptr, u64 Value);
+u8* FLAPExportPutPadded(u8* Ptr, u64 Value, u32 Width);
+u8* FLAPExportPutI64(u8* Ptr, i64 Value);
+u8* FLAPExportPutTime(u8* Ptr, u64 TimeUSecs);
+u8* FLAPExportPutF64(u8* Ptr, f64 Value);
+Str8 FLAPStrFromCSVField(Arena* MemPool, Str8 Field);
 void FLAPExportTableRow(Arena* MemPool, FLAPTableCtx* Ctx, u64 Row, OUT Str8* Cells, OUT u64* TimeUSecs);
 b32 FLAPExport(FLAPExportKind Kind, FLAPExportSource const* Source, Str8 FilePath);
 

@@ -864,7 +864,7 @@ CLIExportGraph(
             Value.Kind != FLI_SCALAR_KIND_F32 &&
             Value.Kind != FLI_SCALAR_KIND_F64
         );
-        u64 RowPosition = ArenaGetPosition(MemPool);
+        Str8 Field = FLAPStrFromCSVField(MemPool, Label);
         u64 SeriesPosition = 0;
         u64 ValueIndex = 0;
 
@@ -883,45 +883,27 @@ CLIExportGraph(
                 f64 V = IsRef
                     ? FLVColumnF64At(&Value, Sample)
                     : (f64) Curve->Values[ValueIndex];
+                u8* Ptr = FLAPExportReserve(
+                    Writer,
+                    Field.Size + FLAP_EXPORT_ROW_SIZE
+                );
 
                 ++ValueIndex;
-                FLAPExportCSVField(Writer, Label);
+                MemCpy(Ptr, Field.Str, Field.Size);
+                Ptr += Field.Size;
+                *Ptr++ = ',';
+                Ptr = FLAPExportPutTime(Ptr, TimeUSecs);
+                *Ptr++ = ',';
 
-                if (V != V) {
-                    FLAPExportWrite(
-                        Writer,
-                        ArenaPushStrFmt(
-                            MemPool,
-                            ",%llu.%06llu,\n",
-                            TimeUSecs / MILLION(1),
-                            TimeUSecs % MILLION(1)
-                        )
-                    );
-                } else if (IsInteger) {
-                    FLAPExportWrite(
-                        Writer,
-                        ArenaPushStrFmt(
-                            MemPool,
-                            ",%llu.%06llu,%lld\n",
-                            TimeUSecs / MILLION(1),
-                            TimeUSecs % MILLION(1),
-                            (i64) V
-                        )
-                    );
-                } else {
-                    FLAPExportWrite(
-                        Writer,
-                        ArenaPushStrFmt(
-                            MemPool,
-                            ",%llu.%06llu,%.7f\n",
-                            TimeUSecs / MILLION(1),
-                            TimeUSecs % MILLION(1),
-                            V
-                        )
-                    );
-                }
+                // NOTE(nc): a value that is not a number has an empty
+                //         : field. FLAPExportPutF64 writes nothing for it.
+                if (IsInteger && V == V)
+                    Ptr = FLAPExportPutI64(Ptr, (i64) V);
+                else
+                    Ptr = FLAPExportPutF64(Ptr, V);
 
-                ArenaPopTo(MemPool, RowPosition);
+                *Ptr++ = '\n';
+                FLAPExportCommit(Writer, Ptr);
             }
         }
     }
@@ -1123,86 +1105,43 @@ CLIMarkSections(
     }
 }
 
-// NOTE(nc): a copy of the flight with only the sections that are needed,
-//         : all of them unpacked. a section that is not needed has no data
-//         : in the copy. a flight with no packed section that is needed is
-//         : used as it is, from the map.
+// NOTE(nc): the flight as it is mapped, with the packed sections that are
+//         : needed unpacked into the arena. a section that is not packed
+//         : is read from the map, and a packed section that is not needed
+//         : has no data.
 INTERNAL FLIParsed
 CLIFlightUnpack(Arena* MemPool, CLIFlight* Flight, u64 const* Needed)
 {
     FLIParsed* Src = &Flight->FLI;
     FLIParsed Result = *Src;
-    FLIHeader* SrcHeader = (FLIHeader*) Src->RawData;
-    u64 TableSize = sizeof(FLISection) * Src->SectionsCount;
-    u64 HeadSize = ALIGNTO(SrcHeader->DataSectionOffset + TableSize, 8);
-    u64 Size = HeadSize;
-    b32 HasPacked = FALSE;
+
+    Result.Unpacked = ArenaPushArrayZero(MemPool, u8*, Src->SectionsCount);
 
     for (u64 Index = 0; Index < Src->SectionsCount; ++Index) {
         FLISection* S = &Src->Sections[Index];
 
-        if (!FLVMaskBit(Needed, Index))
+        if (
+            !FLVMaskBit(Needed, Index) ||
+            S->Encoding != FLI_SECTION_ENCODING_LZB ||
+            !S->EncodedSize ||
+            S->Offset + S->EncodedSize > Src->RawDataSize
+        ) {
             continue;
-
-        Size += ALIGNTO(S->UnpackedSize, 8);
-        HasPacked |= (S->Encoding == FLI_SECTION_ENCODING_LZB);
-    }
-
-    if (HasPacked) {
-        u8* Data = (u8*) ArenaPushSize(
-            MemPool,
-            Size,
-            NC_SIMD_ALIGN256,
-            FALSE
-        );
-        FLISection* Sections = (FLISection*) (
-            Data + SrcHeader->DataSectionOffset
-        );
-        u64 Offset = HeadSize;
-
-        MemCpy(Data, Src->RawData, SrcHeader->DataSectionOffset);
-        MemCpy(Sections, Src->Sections, TableSize);
-
-        for (u64 Index = 0; Index < Src->SectionsCount; ++Index) {
-            FLISection* S = &Src->Sections[Index];
-            FLISection* D = &Sections[Index];
-
-            D->Encoding = FLI_SECTION_ENCODING_UNPACKED;
-
-            if (!FLVMaskBit(Needed, Index)) {
-                D->Offset = 0;
-                D->EncodedSize = 0;
-                D->UnpackedSize = 0;
-                continue;
-            }
-
-            D->Offset = Offset;
-            D->EncodedSize = S->UnpackedSize;
-
-            if (S->Encoding == FLI_SECTION_ENCODING_LZB) {
-                rr_lzb_simple_decode(
-                    Src->RawData + S->Offset,
-                    S->EncodedSize,
-                    Data + Offset,
-                    S->UnpackedSize
-                );
-            } else {
-                MemCpy(
-                    Data + Offset,
-                    Src->RawData + S->Offset,
-                    S->EncodedSize
-                );
-            }
-
-            Offset += ALIGNTO(S->UnpackedSize, 8);
         }
 
-        FLIParse(Data, Size, &Result);
+        u8* Data = (u8*) ArenaPushSize(MemPool, S->UnpackedSize, 8, FALSE);
+
+        rr_lzb_simple_decode(
+            Src->RawData + S->Offset,
+            S->EncodedSize,
+            Data,
+            S->UnpackedSize
+        );
+        Result.Unpacked[Index] = Data;
     }
 
     return Result;
 }
-
 // NOTE(nc): a lane takes one flight. it looks first at which programs are
 //         : fresh, and a flight with none to run is not unpacked. the arena
 //         : goes back to where it was after the flight.

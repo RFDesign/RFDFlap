@@ -348,6 +348,7 @@ struct FLIParsed {
     u64         RawDataSize;
     FLISection* Sections;
     u64         SectionsCount;
+    u8**        Unpacked;
 };
 
 struct FLINode {

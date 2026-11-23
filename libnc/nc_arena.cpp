@@ -238,8 +238,8 @@ ArenaPushSize(Arena* MemPool, u64 Size, u64 Align, b32 Zero)
     #endif
 
         if (!NewBlock) {
-            u64 ReserveSize = Current->ReserveSize;
-            u64 CommitSize = Current->CommitSize;
+            u64 ReserveSize = MemPool->ReserveSize;
+            u64 CommitSize = MemPool->CommitSize;
 
             if (Size + ARENA_HEADER_SIZE > ReserveSize) {
                 ReserveSize = ALIGNTO(Size + ARENA_HEADER_SIZE, Align);

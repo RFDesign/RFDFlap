@@ -2018,6 +2018,18 @@ FLISectionDataFromIndex(
         return Result;
     }
 
+    // NOTE(nc): the caller has unpacked the sections it needs. a section
+    //         : that it did not unpack has no data, and is not looked for
+    //         : in the object cache.
+    if (FLI->Unpacked) {
+        Result.Data = FLI->Unpacked[SectionIndex];
+
+        if (Result.Data)
+            Result.Size = Section->UnpackedSize;
+
+        return Result;
+    }
+
     TempArena Scratch = GetScratch(NULL, 0);
     Str8List Parts = {};
 
@@ -2101,6 +2113,7 @@ FLIParse(u8* Data, u64 Size, OUT FLIParsed* Parsed)
         Parsed->RawDataSize = Size;
         Parsed->Sections = DataSections;
         Parsed->SectionsCount = DataSectionsCount;
+        Parsed->Unpacked = NULL;
     }
 
     return Result;

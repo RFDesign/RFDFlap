@@ -45,6 +45,45 @@ FLAPExportCSVField(FLAPExportWriter* Writer, Str8 Field)
     }
 }
 
+INTERNAL Str8
+FLAPStrFromCSVField(Arena* MemPool, Str8 Field)
+{
+    Str8 Result = Field;
+    u64 QuotesCount = 0;
+    b32 NeedsQuotes = FALSE;
+
+    for (u64 Index = 0; Index < Field.Size; ++Index) {
+        u8 Byte = Field.Str[Index];
+
+        QuotesCount += (Byte == '"');
+        NeedsQuotes |= (
+            Byte == ',' ||
+            Byte == '"' ||
+            Byte == '\n' ||
+            Byte == '\r'
+        );
+    }
+
+    if (NeedsQuotes) {
+        u64 At = 0;
+
+        Result.Size = Field.Size + QuotesCount + 2;
+        Result.Str = ArenaPushArray(MemPool, u8, Result.Size);
+        Result.Str[At++] = '"';
+
+        for (u64 Index = 0; Index < Field.Size; ++Index) {
+            if (Field.Str[Index] == '"')
+                Result.Str[At++] = '"';
+
+            Result.Str[At++] = Field.Str[Index];
+        }
+
+        Result.Str[At++] = '"';
+    }
+
+    return Result;
+}
+
 INTERNAL
 FLAP_EXPORT_FUNC_SIG(CSV)
 {
@@ -81,13 +120,11 @@ FLAP_EXPORT_FUNC_SIG(CSV)
 
             // NOTE(nc): the time is the time in the flight, in seconds, as
             //         : a number. the table shows it from its first row.
-            FLAPExportWrite(
+            FLAPExportCommit(
                 Writer,
-                ArenaPushStrFmt(
-                    MemPool,
-                    "%llu.%06llu",
-                    TimeUSecs / MILLION(1),
-                    TimeUSecs % MILLION(1)
+                FLAPExportPutTime(
+                    FLAPExportReserve(Writer, FLAP_EXPORT_ROW_SIZE),
+                    TimeUSecs
                 )
             );
 
