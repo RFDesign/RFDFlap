@@ -3,12 +3,15 @@
 
 #include "flap_export.h"
 
-global Arena* FLAP_EXPORT_PNG_MEMPOOL = NULL;
-
 INTERNAL void*
 FLAPExportPNGRealloc(void* Ptr, u64 OldSize, u64 NewSize)
 {
-    void* Result = ArenaPushSize(FLAP_EXPORT_PNG_MEMPOOL, NewSize, 16, FALSE);
+    void* Result = ArenaPushSize(
+        GetTLS()->FLAP_EXPORT_PNG_MEMPOOL, 
+        NewSize, 
+        16, 
+        FALSE
+    );
 
     if (Ptr)
         MemCpy(Result, Ptr, MIN(OldSize, NewSize));
@@ -46,7 +49,7 @@ FLAP_EXPORT_FUNC_SIG(PNG)
     b32 Result = FALSE;
 
     if (Source->Pixels && Source->Size.X > 0 && Source->Size.Y > 0) {
-        FLAP_EXPORT_PNG_MEMPOOL = MemPool;
+        GetTLS()->FLAP_EXPORT_PNG_MEMPOOL = MemPool;
         Result = !!stbi_write_png_to_func(
             FLAPExportPNGWrite,
             Writer,
@@ -56,7 +59,7 @@ FLAP_EXPORT_FUNC_SIG(PNG)
             Source->Pixels,
             Source->Size.X * 4
         );
-        FLAP_EXPORT_PNG_MEMPOOL = NULL;
+        GetTLS()->FLAP_EXPORT_PNG_MEMPOOL = NULL;
     }
 
     return Result;

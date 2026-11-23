@@ -17,8 +17,10 @@
 
 #include "cli_main.h"
 
+#include "flap_graph.h"
 #include "flap_widgets.h"
 #include "flap_export.h"
+#include "flap_raster.h"
 
 CLIShared* CLI_SHARED = NULL;
 
@@ -733,6 +735,14 @@ CLIDirectivePath(
     Str8 Dir = CLI_SHARED->OutputPath;
     Str8 Kind = "graph"_s8;
     Str8 Label = ""_s8;
+    Str8 Ext = "csv"_s8;
+
+    if (
+        P->Emits[Head].DisplayKind == TOKEN_KIND_GRAPH &&
+        !CLI_SHARED->IsGraphCSV
+    ) {
+        Ext = "png"_s8;
+    }
 
     if (!Dir.Size) {
         Dir = StrChopLastSlash(Flight->FLIPath);
@@ -755,7 +765,7 @@ CLIDirectivePath(
 
     Str8 Result = ArenaPushStrFmt(
         MemPool,
-        "%S/%S.%S.p%u.d%u.%S%s%S.csv",
+        "%S/%S.%S.p%u.d%u.%S%s%S.%S",
         PRINT_STR(Dir),
         PRINT_STR(StrChopLastDot(StrSkipLastSlash(Flight->FLIPath))),
         PRINT_STR(StrChopLastDot(StrSkipLastSlash(Script->Path))),
@@ -763,7 +773,8 @@ CLIDirectivePath(
         Ordinal,
         PRINT_STR(Kind),
         Label.Size ? "." : "",
-        PRINT_STR(Label)
+        PRINT_STR(Label),
+        PRINT_STR(Ext)
     );
 
     return Result;
@@ -991,6 +1002,299 @@ CLIExportTable(
     return Result;
 }
 
+// NOTE(nc): the draw data of the graph of one directive, as FLAPGraph
+//         : makes it for its box. the time range is the fit of the curves
+//         : and the value axes are the fit of the data in it. there is no
+//         : cursor, no hold and no clock. the result is FALSE when a
+//         : column is not ready.
+INTERNAL b32
+CLIGraphDataFromDirective(
+    Arena* MemPool,
+    Access* Acc,
+    CLIFlight* Flight,
+    FLIParsed* FLI,
+    FLVProgram const* P,
+    FLVRenderItem* Items,
+    u32 Head,
+    u32 Tail,
+    v2i32 Size,
+    OUT FLAPGraphDrawData* Data
+) {
+    b32 Result = TRUE;
+    FLAPGraphMetrics Metrics = FLAPGraphMetricsFromFontSize(
+        CLI_GRAPH_FONT_SIZE
+    );
+    u32 Width = (u32) Size.X;
+    u32 Height = (u32) Size.Y;
+    u32 Gutter = (u32) Metrics.Gutter;
+    u32 Gutters = Gutter;
+    u32 RowHeight = (u32) CLI_GRAPH_ROW_HEIGHT;
+    r1u64 Fit = {};
+
+    MemZero(Data, sizeof(*Data));
+    Data->Curves = ArenaPushArrayZero(
+        MemPool,
+        FLAPGraphDrawCurve,
+        Tail - Head
+    );
+    Data->Labels = ArenaPushArrayZero(
+        MemPool,
+        FLAPGraphDrawLabel,
+        Tail - Head
+    );
+    Data->Metrics = Metrics;
+    Fit.Min = U64_MAX;
+
+    // NOTE(nc): the columns are waited for here, so the reduce finds them
+    //         : ready. the fit is the time of all the curves.
+    for (u32 Index = Head; Index < Tail; ++Index) {
+        if (!FLAPGraphEmitIsCurve(P, Items, Index))
+            continue;
+
+        FLVRenderCurve const* Curve = &Items[Index].Curve;
+        FLVColumn Time = {};
+        FLVColumn Value = {};
+
+        if (Curve->Axis == 2)
+            Gutters = 2 * Gutter;
+
+        Result &= FLVColumnInit(
+            Acc,
+            Flight->Key,
+            FLI,
+            Curve->TimeColumn,
+            U64_MAX,
+            &Time
+        );
+
+        if (Curve->ValueColumn != FLV_COLUMN_NONE) {
+            Result &= FLVColumnInit(
+                Acc,
+                Flight->Key,
+                FLI,
+                Curve->ValueColumn,
+                U64_MAX,
+                &Value
+            );
+        }
+
+        if (Time.IsMissing)
+            continue;
+
+        for (
+            u64 RangeIndex = 0;
+            RangeIndex < Curve->RangesCount;
+            ++RangeIndex
+        ) {
+            r1u64 Range = Curve->Ranges[RangeIndex];
+
+            if (Range.Min == Range.Max)
+                continue;
+
+            Fit.Min = MIN(Fit.Min, FLVTimeAt(&Time, Range.Min));
+            Fit.Max = MAX(Fit.Max, FLVTimeAt(&Time, Range.Max - 1) + 1);
+        }
+    }
+
+    Data->PlotX = Gutter;
+    Data->PlotY = RowHeight;
+    Data->Width = (Width > Gutters)
+        ? Width - Gutters
+        : 0;
+    Data->Height = (Height > 2 * RowHeight)
+        ? Height - 2 * RowHeight
+        : 0;
+
+    if (Fit.Min < Fit.Max)
+        Data->TimeRangeUSecs = Fit;
+
+    u64 Step = FLAPGraphStepFromSpan(
+        Length(Data->TimeRangeUSecs),
+        Data->Width * Metrics.ColumnsPerUnit
+    );
+    r1u64 View = FLAPGraphViewFromTimeRange(Data->TimeRangeUSecs, Step);
+    // NOTE(nc): one column more at each side, as the app has, so that the
+    //         : curve does not stop at the edge of the plot
+    r1u64 Reduce = Rng(View.Min - (View.Min ? 1 : 0), View.Max + 1);
+
+    Data->StepUSecs = Step;
+    Data->View = View;
+
+    for (u32 Index = Head; Index < Tail; ++Index) {
+        FLAPGraphDrawLabel* Label = &Data->Labels[Data->LabelsCount++];
+        Str8 Name = P->Strings[P->Emits[Index].LabelStringIndex];
+
+        if (!FLAPGraphEmitIsCurve(P, Items, Index)) {
+            Label->String = ArenaPushStrFmt(
+                MemPool,
+                "%S (missing)",
+                PRINT_STR(Name)
+            );
+            continue;
+        }
+
+        FLAPGraphColumns* Columns = ArenaPushArrayZero(
+            MemPool,
+            FLAPGraphColumns,
+            1
+        );
+        FLAPGraphDrawCurve* Curve = &Data->Curves[Data->CurvesCount];
+        FLAPGraphKey Key = {};
+
+        Key.Curve = &Items[Index].Curve;
+        Key.Flight = Flight->Key;
+        Key.StepUSecs = Step;
+        Result &= FLAPGraphColumnsFromKey(
+            MemPool,
+            Columns,
+            &Key,
+            Step ? Reduce : Rng((u64) 0ULL, (u64) 0ULL),
+            Acc,
+            FLI
+        );
+
+        Curve->Columns = Columns;
+        Curve->Name = Name;
+        Curve->Axis = (Key.Curve->Axis == 2);
+        Curve->Samples = FLAPGraphFitValueRange(
+            Columns,
+            View,
+            Data->TimeRangeUSecs,
+            &Data->ValueRanges[Curve->Axis],
+            &Data->HasRange[Curve->Axis]
+        );
+        Label->String = ArenaPushStrFmt(
+            MemPool,
+            "%S%S",
+            PRINT_STR(Name),
+            PRINT_STR(Curve->Axis ? ":2"_s8 : ""_s8)
+        );
+        ++Data->CurvesCount;
+    }
+
+    for (u32 Axis = 0; Axis < 2; ++Axis) {
+        if (Data->ValueRanges[Axis].Max <= Data->ValueRanges[Axis].Min) {
+            Data->ValueRanges[Axis].Min -= 1.0f;
+            Data->ValueRanges[Axis].Max += 1.0f;
+        }
+    }
+
+    return Result;
+}
+
+// NOTE(nc): the graph as a picture. for now a column is the span from its
+//         : min to its max, one pixel wide, which is a check of the reduce
+//         : and of the axes until the curves have their coverage.
+INTERNAL b32
+CLIExportGraphImage(
+    Arena* MemPool,
+    FLAPExportWriter* Writer,
+    FLAPRasterImage* Image,
+    Access* Acc,
+    CLIFlight* Flight,
+    FLIParsed* FLI,
+    FLVProgram const* P,
+    FLVRenderItem* Items,
+    u32 Head,
+    u32 Tail
+) {
+    FLAPGraphDrawData Data = {};
+    FLAPExportSource Source = {};
+    i32 Width = (i32) Image->Width;
+    i32 Height = (i32) Image->Height;
+    b32 Result = CLIGraphDataFromDirective(
+        MemPool,
+        Acc,
+        Flight,
+        FLI,
+        P,
+        Items,
+        Head,
+        Tail,
+        Vec(Width, Height),
+        &Data
+    );
+    r2i32 Plot = Rng(
+        (i32) Data.PlotX,
+        (i32) Data.PlotY,
+        (i32) (Data.PlotX + Data.Width),
+        (i32) (Data.PlotY + Data.Height)
+    );
+    r1u64 ViewRange = Data.TimeRangeUSecs;
+    u64 Step = (Data.Width && Data.Height)
+        ? Data.StepUSecs
+        : 0;
+    f64 PXPerUSec = Step
+        ? (f64) Data.Width / (f64) Length(ViewRange)
+        : 0.0;
+
+    FLAPRasterFill(
+        Image,
+        Rng(0, 0, Width, Height),
+        FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_BACKGROUND)
+    );
+    FLAPRasterFill(
+        Image,
+        Plot,
+        FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_PLOT)
+    );
+
+    for (
+        u32 CurveIndex = 0;
+        Step && CurveIndex < Data.CurvesCount;
+        ++CurveIndex
+    ) {
+        FLAPGraphDrawCurve* Curve = &Data.Curves[CurveIndex];
+        FLAPGraphColumns const* Columns = Curve->Columns;
+        r1f32 Range = Data.ValueRanges[Curve->Axis];
+        f32 Scale = (f32) (Data.Height - 1) / (Range.Max - Range.Min);
+        u32 Pixel = FLAPRasterPixelFromColour(
+            FLAP_RASTER_CURVE_COLOUR_TABLE[
+                CurveIndex % FLAP_RASTER_CURVE_COLOURS
+            ]
+        );
+
+        for (u64 Column = Data.View.Min; Column < Data.View.Max; ++Column) {
+            u64 Slot = 0;
+
+            if (!FLAPGraphColumnHas(Columns, Column, &Slot))
+                continue;
+
+            // NOTE(nc): the middle of the column, from the start of the
+            //         : view. the first column can start before the view.
+            f64 Middle = (
+                (f64) (Column * Step) + 0.5 * (f64) Step - (f64) ViewRange.Min
+            );
+
+            if (Middle < 0.0)
+                continue;
+
+            i32 X = Plot.X0 + (i32) (Middle * PXPerUSec);
+
+            if (X >= Plot.X1)
+                continue;
+
+            i32 Top = Plot.Y0 + (i32) (
+                (Range.Max - Columns->Max[Slot]) * Scale + 0.5f
+            );
+            i32 Bottom = Plot.Y0 + (i32) (
+                (Range.Max - Columns->Min[Slot]) * Scale + 0.5f
+            );
+
+            FLAPRasterFill(Image, Rng(X, Top, X + 1, Bottom + 1), Pixel);
+        }
+    }
+
+    Source.Pixels = (u8*) Image->Pixels;
+    Source.Size = Vec(Width, Height);
+    Result = (
+        FLAP_EXPORT_FUNC_NAME(PNG)(MemPool, &Source, Writer) &&
+        Result
+    );
+
+    return Result;
+}
+
 // NOTE(nc): the file is made with another name and is moved to its name
 //         : when it is whole, so a run that is stopped leaves no result
 //         : that looks fresh.
@@ -998,6 +1302,7 @@ INTERNAL b32
 CLIExportDirective(
     Arena* MemPool,
     u8* Chunk,
+    FLAPRasterImage* Image,
     Access* Acc,
     CLIFlight* Flight,
     FLIParsed* FLI,
@@ -1022,17 +1327,32 @@ CLIExportDirective(
             default: {} break;
 
             case TOKEN_KIND_GRAPH: {
-                Result = CLIExportGraph(
-                    MemPool,
-                    &Writer,
-                    Acc,
-                    Flight,
-                    FLI,
-                    P,
-                    Items,
-                    Head,
-                    Tail
-                );
+                if (CLI_SHARED->IsGraphCSV) {
+                    Result = CLIExportGraph(
+                        MemPool,
+                        &Writer,
+                        Acc,
+                        Flight,
+                        FLI,
+                        P,
+                        Items,
+                        Head,
+                        Tail
+                    );
+                } else {
+                    Result = CLIExportGraphImage(
+                        MemPool,
+                        &Writer,
+                        Image,
+                        Acc,
+                        Flight,
+                        FLI,
+                        P,
+                        Items,
+                        Head,
+                        Tail
+                    );
+                }
             } break;
 
             case TOKEN_KIND_FLAG: {
@@ -1152,6 +1472,15 @@ CLIRunFlights(Arena* MemPool)
     //         : results go to the arena of the lane.
     Arena* RunMemPool = ArenaAlloc();
     u8* Chunk = ArenaPushArray(MemPool, u8, FLAP_EXPORT_CHUNK_SIZE);
+    FLAPRasterImage Image = {};
+
+    if (!CLI_SHARED->IsGraphCSV) {
+        Image = FLAPRasterImageAlloc(
+            MemPool,
+            (u32) CLI_SHARED->GraphSize.X,
+            (u32) CLI_SHARED->GraphSize.Y
+        );
+    }
 
     for (;;) {
         u64 Index = AtomicIncFetchU64(
@@ -1336,6 +1665,7 @@ CLIRunFlights(Arena* MemPool)
                     b32 IsWritten = CLIExportDirective(
                         MemPool,
                         Chunk,
+                        &Image,
                         Acc,
                         Flight,
                         &FLI,
@@ -1449,15 +1779,18 @@ CLIEntryPoint(CommandLine* CLI)
             "-------------------------------------------------------------------------------\n"_s8
             "BIN and FLI files are flights. FLV files are run on every flight.\n\n"
             "--out:<dir>         Where the results go. They go next to the\n"
-            "                    flight when this is not given.\n"
+            "                    flight when this is not given.\n\n"
             "--fli_out:<dir>     Where the FLI of a BIN goes. It goes next to\n"
-            "                    the BIN when this is not given.\n"
-            "--recursive         Folders inside the given folders are read.\n"
-            "--force             All the work is done again.\n"
-            "--dry_run           Lists what was found and stops.\n"
-            "--thread_count:<n>  The number of worker threads.\n"_s8
-            "--no_compress       The FLI files are written with no compression.\n"
-            "--import:<dir>      A folder that FLV imports are looked for in.\n"
+            "                    the BIN when this is not given.\n\n"
+            "--recursive         Folders inside the given folders are read.\n\n"
+            "--force             All the work is done again.\n\n"
+            "--dry_run           Lists what was found and stops.\n\n"
+            "--thread_count:<n>  The number of worker threads.\n\n"_s8
+            "--no_compress       The FLI files are written with no compression.\n\n"
+            "--import:<dir>      A folder that FLV imports are looked for in.\n\n"
+            "--graph_width:<n>   The width of a graph image, in pixels.\n\n"
+            "--graph_height:<n>  The height of a graph image, in pixels.\n\n"
+            "--graph_csv         A graph is written as CSV and not as PNG.\n\n"
         );
 
         return;
@@ -1506,6 +1839,30 @@ CLIEntryPoint(CommandLine* CLI)
     CLI_SHARED->IsForced = CommandLineHasFlag(CLI, "force"_s8);
     CLI_SHARED->IsDryRun = CommandLineHasFlag(CLI, "dry_run"_s8);
     CLI_SHARED->DoCompress = !CommandLineHasFlag(CLI, "no_compress"_s8);
+    CLI_SHARED->IsGraphCSV = CommandLineHasFlag(CLI, "graph_csv"_s8);
+    CLI_SHARED->GraphSize = Vec(
+        (i32) CLI_GRAPH_WIDTH,
+        (i32) CLI_GRAPH_HEIGHT
+    );
+
+    Str8 GraphWidthRaw = CommandLineString(CLI, "graph_width"_s8);
+    Str8 GraphHeightRaw = CommandLineString(CLI, "graph_height"_s8);
+
+    if (GraphWidthRaw.Size) {
+        CLI_SHARED->GraphSize.X = (i32) CLAMP(
+            (u64) CLI_GRAPH_SIZE_MIN,
+            U64FromStr(GraphWidthRaw),
+            (u64) CLI_GRAPH_SIZE_MAX
+        );
+    }
+
+    if (GraphHeightRaw.Size) {
+        CLI_SHARED->GraphSize.Y = (i32) CLAMP(
+            (u64) CLI_GRAPH_SIZE_MIN,
+            U64FromStr(GraphHeightRaw),
+            (u64) CLI_GRAPH_SIZE_MAX
+        );
+    }
 
     Handle* Threads = ArenaPushArrayZero(
         Scratch.MemPool,

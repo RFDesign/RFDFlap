@@ -25,6 +25,7 @@
 #include "flap_widgets.h"
 #include "flap_export.h"
 #include "flap_views.h"
+#include "flap_raster.h"
 
 #include "cli_main.h"
 
@@ -54,6 +55,7 @@
 #include "flap_export_csv.cpp"
 #include "flap_export_txt.cpp"
 #include "flap_views.cpp"
+#include "flap_raster.cpp"
 
 #if defined(NC_FLI)
     #include "fli_main.cpp"

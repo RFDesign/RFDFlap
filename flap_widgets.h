@@ -263,6 +263,7 @@ void FLAPTable(FLAPTableParams* Params, r2f32 Rect);
 void FLAPFlagList(FLAPFlagListParams* Params, r2f32 Rect);
 void FLAPErrorList(FLAPErrorListParams* Params, r2f32 Rect);
 FLAPGraphMetrics FLAPGraphMetricsFromFontSize(f32 FontSize);
+b32 FLAPGraphEmitIsCurve(FLVProgram const* Program, FLVRenderItem* Items, u32 Index);
 void FLAPGraph(FLAPGraphParams* Params, r2f32 Rect);
 b32 FLAPTableCtxFromParams(Arena* MemPool, FLAPTableParams* Params, OUT FLAPTableCtx* Ctx);
 

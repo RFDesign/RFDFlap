@@ -14,7 +14,14 @@ struct Arena;
 struct FLVUnit;
 
 // @defines____________________________________________________________________
-#define CLI_FLIGHT_SLOTS_COUNT 4096
+#define CLI_FLIGHT_SLOTS_COUNT  4096
+#define CLI_GRAPH_WIDTH         1600
+#define CLI_GRAPH_HEIGHT         900
+#define CLI_GRAPH_SIZE_MIN       256
+#define CLI_GRAPH_SIZE_MAX     16384
+#define CLI_GRAPH_FONT_SIZE       12.0f
+
+#define CLI_GRAPH_ROW_HEIGHT (2.0f * CLI_GRAPH_FONT_SIZE)
 
 // @types______________________________________________________________________
 struct CLIThreadParams {
@@ -69,10 +76,13 @@ struct CLIShared {
     u64         FreshCount;
     u64         FailCount;
     u64         ConvertedCount;
+    v2i32       GraphSize;
     b32         IsRecursive;
     b32         IsForced;
     b32         IsDryRun;
     b32         DoCompress;
+    b32         IsGraphCSV;
+    u32         __Padding;
 };
 
 // @runtime____________________________________________________________________

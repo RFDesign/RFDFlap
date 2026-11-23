@@ -2535,55 +2535,13 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
             )
         );
         Label->Colour = Curve->Colour;
-
-        r1f32* Range = &Data->ValueRanges[Curve->Axis];
-
-        for (
-            u64 Column = View.Min; 
-            Step && Column < View.Max; 
-            ++Column
-        ) {
-            u64 Slot = 0;
-
-            if (!FLAPGraphColumnHas(Columns, Column, &Slot))
-                continue;
-
-            Curve->Samples += Columns->Samples[Slot];
-
-            if (!Data->HasRange[Curve->Axis]) {
-                Range->Min = Columns->Min[Slot];
-                Range->Max = Columns->Max[Slot];
-                Data->HasRange[Curve->Axis] = TRUE;
-            } else {
-                Range->Min = MIN(Range->Min, Columns->Min[Slot]);
-                Range->Max = MAX(Range->Max, Columns->Max[Slot]);
-            }
-        }
-
-        // NOTE(nc): no sample is in the view, but the line between the
-        //         : sample before it and the sample after it is. the range
-        //         : takes the part of that line that is in the view.
-        if (Step && Columns->HasBridge) {
-            FLAPGraphEdge Lead = Columns->Lead;
-            FLAPGraphEdge Trail = Columns->Trail;
-            f64 Span = (f64) (Trail.TimeUSecs - Lead.TimeUSecs);
-            f32 Rise = Trail.Value - Lead.Value;
-            f32 Enter = Lead.Value + Rise * (f32) (
-                ((f64) Data->TimeRangeUSecs.Min - (f64) Lead.TimeUSecs) / Span
-            );
-            f32 Leave = Lead.Value + Rise * (f32) (
-                ((f64) Data->TimeRangeUSecs.Max - (f64) Lead.TimeUSecs) / Span
-            );
-
-            if (!Data->HasRange[Curve->Axis]) {
-                Range->Min = MIN(Enter, Leave);
-                Range->Max = MAX(Enter, Leave);
-                Data->HasRange[Curve->Axis] = TRUE;
-            } else {
-                Range->Min = MIN(Range->Min, MIN(Enter, Leave));
-                Range->Max = MAX(Range->Max, MAX(Enter, Leave));
-            }
-        }
+        Curve->Samples = FLAPGraphFitValueRange(
+            Columns,
+            View,
+            Data->TimeRangeUSecs,
+            &Data->ValueRanges[Curve->Axis],
+            &Data->HasRange[Curve->Axis]
+        );
 
         ++Data->CurvesCount;
     }

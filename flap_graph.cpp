@@ -672,3 +672,59 @@ FLAPGraphSampleNearTime(
 
     return Result;
 }
+
+INTERNAL u64
+FLAPGraphFitValueRange(
+    FLAPGraphColumns const* Columns,
+    r1u64 View,
+    r1u64 TimeRangeUSecs,
+    r1f32* Range,
+    b32* HasRange
+) {
+    u64 Result = 0;
+
+    if (!Columns->Key.StepUSecs)
+        return Result;
+
+    for (u64 Column = View.Min; Column < View.Max; ++Column) {
+        u64 Slot = 0;
+
+        if (!FLAPGraphColumnHas(Columns, Column, &Slot))
+            continue;
+
+        Result += Columns->Samples[Slot];
+
+        if (!*HasRange) {
+            Range->Min = Columns->Min[Slot];
+            Range->Max = Columns->Max[Slot];
+            *HasRange = TRUE;
+        } else {
+            Range->Min = MIN(Range->Min, Columns->Min[Slot]);
+            Range->Max = MAX(Range->Max, Columns->Max[Slot]);
+        }
+    }
+
+    if (Columns->HasBridge) {
+        FLAPGraphEdge Lead = Columns->Lead;
+        FLAPGraphEdge Trail = Columns->Trail;
+        f64 Span = (f64) (Trail.TimeUSecs - Lead.TimeUSecs);
+        f32 Rise = Trail.Value - Lead.Value;
+        f32 Enter = Lead.Value + Rise * (f32) (
+            ((f64) TimeRangeUSecs.Min - (f64) Lead.TimeUSecs) / Span
+        );
+        f32 Leave = Lead.Value + Rise * (f32) (
+            ((f64) TimeRangeUSecs.Max - (f64) Lead.TimeUSecs) / Span
+        );
+
+        if (!*HasRange) {
+            Range->Min = MIN(Enter, Leave);
+            Range->Max = MAX(Enter, Leave);
+            *HasRange = TRUE;
+        } else {
+            Range->Min = MIN(Range->Min, MIN(Enter, Leave));
+            Range->Max = MAX(Range->Max, MAX(Enter, Leave));
+        }
+    }
+
+    return Result;
+}
