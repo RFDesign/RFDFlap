@@ -22,6 +22,7 @@ struct FLVUnit;
 #define CLI_GRAPH_FONT_SIZE       12.0f
 
 #define CLI_GRAPH_ROW_HEIGHT (2.0f * CLI_GRAPH_FONT_SIZE)
+#define CLI_GRAPH_GRID_ALPHA 0.15f
 
 // @types______________________________________________________________________
 struct CLIThreadParams {
@@ -57,6 +58,15 @@ struct CLIScript {
     WallClockTime SourceTime;
 };
 
+struct CLIGraphTicks {
+    u64 TimeStepUSecs;
+    u64 TimeFirstUSecs;
+    f32 ValueSteps[2];
+    f32 ValueFirsts[2];
+    u32 TimeDigits;
+    u32 __Padding;
+};
+
 struct CLIShared {
     Arena*      MemPool;
     CLIFlight** FlightSlots;
@@ -82,7 +92,7 @@ struct CLIShared {
     b32         IsDryRun;
     b32         DoCompress;
     b32         IsGraphCSV;
-    u32         __Padding;
+    b32         HasGraphGrid;
 };
 
 // @runtime____________________________________________________________________

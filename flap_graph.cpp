@@ -728,3 +728,59 @@ FLAPGraphFitValueRange(
 
     return Result;
 }
+
+// NOTE(nc): the part of a line that is in the rect, with Pad more at each
+//         : side of it. an end of the line can be far from the rect, so
+//         : the line is cut in f64. the result is FALSE when no part of
+//         : the line is in the rect.
+INTERNAL b32
+FLAPGraphClipLine(
+    r2f32 Rect,
+    f64 Pad,
+    f64* FromX,
+    f64* FromY,
+    f64* ToX,
+    f64* ToY
+) {
+    f64 DeltaX = *ToX - *FromX;
+    f64 DeltaY = *ToY - *FromY;
+    f64 Deltas[4] = {
+        -DeltaX,
+        DeltaX,
+        -DeltaY,
+        DeltaY
+    };
+    f64 Distances[4] = {
+        *FromX - ((f64) Rect.X0 - Pad),
+        ((f64) Rect.X1 + Pad) - *FromX,
+        *FromY - ((f64) Rect.Y0 - Pad),
+        ((f64) Rect.Y1 + Pad) - *FromY
+    };
+    f64 Enter = 0.0;
+    f64 Leave = 1.0;
+    b32 IsVisible = TRUE;
+
+    for (u32 Index = 0; Index < 4 && IsVisible; ++Index) {
+        if (Deltas[Index] == 0.0) {
+            IsVisible = (Distances[Index] >= 0.0);
+        } else if (Deltas[Index] < 0.0) {
+            Enter = MAX(Enter, Distances[Index] / Deltas[Index]);
+        } else {
+            Leave = MIN(Leave, Distances[Index] / Deltas[Index]);
+        }
+    }
+
+    b32 Result = (IsVisible && Enter < Leave);
+
+    if (Result) {
+        f64 X = *FromX;
+        f64 Y = *FromY;
+
+        *FromX = X + Enter * DeltaX;
+        *FromY = Y + Enter * DeltaY;
+        *ToX = X + Leave * DeltaX;
+        *ToY = Y + Leave * DeltaY;
+    }
+
+    return Result;
+}

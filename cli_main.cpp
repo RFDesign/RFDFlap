@@ -1182,14 +1182,346 @@ CLIGraphDataFromDirective(
     return Result;
 }
 
-// NOTE(nc): the graph as a picture. for now a column is the span from its
-//         : min to its max, one pixel wide, which is a check of the reduce
-//         : and of the axes until the curves have their coverage.
+INTERNAL void
+CLIGraphEdgeLine(
+    FLAPRasterMask* Mask,
+    r2f32 Rect,
+    f64 FromX,
+    f64 FromY,
+    f64 ToX,
+    f64 ToY,
+    f32 LineWidth
+) {
+    if (
+        FLAPGraphClipLine(
+            Rect,
+            2.0 * (f64) LineWidth,
+            &FromX,
+            &FromY,
+            &ToX,
+            &ToY
+        )
+    ) {
+        FLAPRasterLine(
+            Mask,
+            Vec((f32) FromX, (f32) FromY),
+            Vec((f32) ToX, (f32) ToY),
+            0.5f * LineWidth
+        );
+    }
+}
+
+// NOTE(nc): the coverage of one curve, in the mask. it is the curve loop
+//         : of FLAPGraphDraw, with the shapes of the raster in the place
+//         : of the shapes of the CAD pass. the positions are from the
+//         : corner of the plot. there is no hover ring.
+INTERNAL void
+CLIGraphCurve(
+    FLAPRasterMask* Mask,
+    FLAPGraphDrawData const* Data,
+    FLAPGraphDrawCurve const* Curve
+) {
+    FLAPGraphColumns const* Columns = Curve->Columns;
+    FLAPGraphMetrics Metrics = Data->Metrics;
+    r2f32 PlotRect = Rng(
+        0.0f,
+        0.0f,
+        (f32) Data->Width,
+        (f32) Data->Height
+    );
+    r1u64 View = Data->View;
+    r1u64 ViewRange = Data->TimeRangeUSecs;
+    u64 Step = Data->StepUSecs;
+    f64 PXPerUSec = (f64) Data->Width / (f64) Length(ViewRange);
+    f32 ColumnPX = (f32) ((f64) Step * PXPerUSec);
+    f32 HalfColumnPX = 0.5f * ColumnPX;
+    f32 HalfWidth = 0.5f * Metrics.LineWidth;
+    u64 ColumnMin = View.Min - (
+        View.Min
+            ? 1
+            : 0
+    );
+    u64 ColumnMax = View.Max + 1;
+    r1f32 Range = Data->ValueRanges[Curve->Axis];
+    f32 Scale = (f32) (Data->Height - 1) / (Range.Max - Range.Min);
+    b32 HasMarkers = (
+        Curve->Samples &&
+        (f32) Curve->Samples * Metrics.MarkerSpacing <= (f32) Data->Width
+    );
+    b32 HasPrev = FALSE;
+    b32 HasPoint = FALSE;
+    b32 IsPrevEdge = FALSE;
+    b32 IsPrevRange = FALSE;
+    u64 PrevColumn = 0;
+    f64 PrevEdgeX = 0.0;
+    f32 PrevX = 0.0f;
+    f32 PrevTop = 0.0f;
+    f32 PrevBottom = 0.0f;
+    f32 PrevLast = 0.0f;
+
+    if (Columns->Lead.Has) {
+        PrevEdgeX = (
+            (f64) Columns->Lead.TimeUSecs - (f64) ViewRange.Min
+        ) * PXPerUSec;
+        PrevLast = (Range.Max - Columns->Lead.Value) * Scale + 0.5f;
+        HasPrev = TRUE;
+        IsPrevEdge = TRUE;
+    }
+
+    for (u64 Column = ColumnMin; Column < ColumnMax; ++Column) {
+        u64 Slot = 0;
+
+        if (!FLAPGraphColumnHas(Columns, Column, &Slot))
+            continue;
+
+        b32 IsRange = (Columns->Samples[Slot] != 1);
+        f32 Offset = IsRange
+            ? 0.5f
+            : Columns->Phase[Slot];
+        f32 X = (f32) (
+            (f64) (
+                (i64) (Column * Step) - (i64) ViewRange.Min
+            ) * PXPerUSec
+        ) + Offset * ColumnPX;
+        f32 Top = (Range.Max - Columns->Max[Slot]) * Scale + 0.5f;
+        f32 Bottom = (Range.Max - Columns->Min[Slot]) * Scale + 0.5f;
+        f32 First = (Range.Max - Columns->First[Slot]) * Scale + 0.5f;
+        f32 Last = (Range.Max - Columns->Last[Slot]) * Scale + 0.5f;
+        b32 IsJoined = (
+            HasPrev &&
+            (Columns->Join[Slot >> 6] & (1ULL << (Slot & 63))) != 0
+        );
+        b32 IsAdjacent = (
+            IsJoined &&
+            !IsPrevEdge &&
+            Column == PrevColumn + 1
+        );
+
+        if (HasPoint && !IsJoined)
+            FLAPRasterDisc(Mask, Vec(PrevX, PrevTop), HalfWidth);
+
+        if (IsPrevRange && !IsAdjacent) {
+            FLAPRasterRibbon(
+                Mask,
+                Vec(PrevX, PrevTop),
+                Vec(PrevX + HalfColumnPX, PrevTop),
+                PrevBottom,
+                PrevBottom,
+                HalfWidth
+            );
+        }
+
+        if (IsAdjacent) {
+            FLAPRasterRibbon(
+                Mask,
+                Vec(PrevX, PrevTop),
+                Vec(X, Top),
+                PrevBottom,
+                Bottom,
+                HalfWidth
+            );
+        } else if (IsJoined && IsPrevEdge) {
+            CLIGraphEdgeLine(
+                Mask,
+                PlotRect,
+                PrevEdgeX,
+                (f64) PrevLast,
+                (f64) X,
+                (f64) First,
+                Metrics.LineWidth
+            );
+        } else if (IsJoined) {
+            FLAPRasterLine(
+                Mask,
+                Vec(PrevX, PrevLast),
+                Vec(X, First),
+                HalfWidth
+            );
+        }
+
+        if (IsRange && !IsAdjacent) {
+            FLAPRasterRibbon(
+                Mask,
+                Vec(X - HalfColumnPX, Top),
+                Vec(X, Top),
+                Bottom,
+                Bottom,
+                HalfWidth
+            );
+        }
+
+        if (HasMarkers)
+            FLAPRasterDisc(Mask, Vec(X, Top), 2.0f * Metrics.LineWidth);
+
+        HasPoint = (!IsRange && !IsJoined && !HasMarkers);
+        HasPrev = TRUE;
+        IsPrevEdge = FALSE;
+        IsPrevRange = IsRange;
+        PrevColumn = Column;
+        PrevX = X;
+        PrevTop = Top;
+        PrevBottom = Bottom;
+        PrevLast = Last;
+    }
+
+    if (IsPrevRange) {
+        FLAPRasterRibbon(
+            Mask,
+            Vec(PrevX, PrevTop),
+            Vec(PrevX + HalfColumnPX, PrevTop),
+            PrevBottom,
+            PrevBottom,
+            HalfWidth
+        );
+    }
+
+    if (HasPrev && Columns->Trail.Has) {
+        f64 TrailX = (
+            (f64) Columns->Trail.TimeUSecs - (f64) ViewRange.Min
+        ) * PXPerUSec;
+        f32 TrailY = (Range.Max - Columns->Trail.Value) * Scale + 0.5f;
+
+        CLIGraphEdgeLine(
+            Mask,
+            PlotRect,
+            IsPrevEdge
+                ? PrevEdgeX
+                : (f64) PrevX,
+            (f64) PrevLast,
+            TrailX,
+            (f64) TrailY,
+            Metrics.LineWidth
+        );
+    } else if (HasPoint) {
+        FLAPRasterDisc(Mask, Vec(PrevX, PrevTop), HalfWidth);
+    }
+}
+
+// NOTE(nc): the ticks of the graph, as FLAPGraphDraw has them for its
+//         : labels. the time is from the start of the file, so the first
+//         : tick is the first whole step in the view.
+INTERNAL CLIGraphTicks
+CLIGraphTicksFromData(FLAPGraphDrawData const* Data)
+{
+    CLIGraphTicks Result = {};
+    FLAPGraphMetrics Metrics = Data->Metrics;
+    r1u64 ViewRange = Data->TimeRangeUSecs;
+    u64 Span = Length(ViewRange);
+
+    for (u32 Axis = 0; Axis < 2; ++Axis) {
+        if (!Data->HasRange[Axis] || !Data->Height)
+            continue;
+
+        r1f32 Range = Data->ValueRanges[Axis];
+        f32 ValueStep = FLAPGraphTickStep(
+            Range.Max - Range.Min,
+            MAX(
+                (u32) ((f32) Data->Height / MAX(Metrics.ValueTick, 1.0f)),
+                (u32) 2
+            )
+        );
+
+        Result.ValueSteps[Axis] = ValueStep;
+        Result.ValueFirsts[Axis] = CeilF32(Range.Min / ValueStep);
+    }
+
+    if (Data->StepUSecs && Span && Data->Width) {
+        u32 MaxTicks = MAX(
+            (u32) ((f32) Data->Width / MAX(Metrics.TimeTick, 1.0f)),
+            (u32) 1
+        );
+        u64 TickUSecs = FLAPGraphTickUSecs(Span, MaxTicks, FALSE);
+        u64 First = ViewRange.Min - (ViewRange.Min % TickUSecs);
+
+        if (First < ViewRange.Min)
+            First += TickUSecs;
+
+        Result.TimeStepUSecs = TickUSecs;
+        Result.TimeFirstUSecs = First;
+        Result.TimeDigits = (TickUSecs >= MILLION(1))
+            ? 0
+            : (TickUSecs >= THOUSAND(1))
+                ? 3
+                : 6;
+    }
+
+    return Result;
+}
+
+// NOTE(nc): one line for each tick, in the colour of the labels with a
+//         : low alpha. it is drawn before the curves, so they are over it.
+//         : the value lines are for the left axis, and for the right axis
+//         : only when the left has no curve.
+INTERNAL void
+CLIGraphGrid(
+    FLAPRasterImage* Image,
+    FLAPGraphDrawData const* Data,
+    CLIGraphTicks const* Ticks,
+    r2i32 Plot
+) {
+    u32 Pixel = FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_LABEL);
+    u32 Axis = Data->HasRange[0]
+        ? 0
+        : 1;
+    r1u64 ViewRange = Data->TimeRangeUSecs;
+
+    if (Ticks->ValueSteps[Axis] > 0.0f) {
+        r1f32 Range = Data->ValueRanges[Axis];
+        f32 Scale = (f32) (Data->Height - 1) / (Range.Max - Range.Min);
+
+        for (u32 Tick = 0; ; ++Tick) {
+            f32 Value = (
+                (Ticks->ValueFirsts[Axis] + (f32) Tick) *
+                Ticks->ValueSteps[Axis]
+            );
+
+            if (Value > Range.Max)
+                break;
+
+            // NOTE(nc): the row that a curve at this value has its middle
+            //         : in
+            i32 Y = Plot.Y0 + (i32) FloorF32(
+                (Range.Max - Value) * Scale + 0.5f
+            );
+
+            FLAPRasterBlend(
+                Image,
+                Rng(Plot.X0, Y, Plot.X1, Y + 1),
+                Pixel,
+                CLI_GRAPH_GRID_ALPHA
+            );
+        }
+    }
+
+    if (Ticks->TimeStepUSecs) {
+        f64 PXPerUSec = (f64) Data->Width / (f64) Length(ViewRange);
+
+        for (
+            u64 TimeUSecs = Ticks->TimeFirstUSecs;
+            TimeUSecs < ViewRange.Max;
+            TimeUSecs += Ticks->TimeStepUSecs
+        ) {
+            i32 X = Plot.X0 + (i32) (
+                (f64) (TimeUSecs - ViewRange.Min) * PXPerUSec
+            );
+
+            FLAPRasterBlend(
+                Image,
+                Rng(X, Plot.Y0, X + 1, Plot.Y1),
+                Pixel,
+                CLI_GRAPH_GRID_ALPHA
+            );
+        }
+    }
+}
+
+// NOTE(nc): the graph as a picture: the background, the plot, and each
+//         : curve as a mask that is blended over them in its colour.
 INTERNAL b32
 CLIExportGraphImage(
     Arena* MemPool,
     FLAPExportWriter* Writer,
-    FLAPRasterImage* Image,
+    FLAPRasterCanvas* Canvas,
     Access* Acc,
     CLIFlight* Flight,
     FLIParsed* FLI,
@@ -1198,6 +1530,8 @@ CLIExportGraphImage(
     u32 Head,
     u32 Tail
 ) {
+    FLAPRasterImage* Image = &Canvas->Image;
+    FLAPRasterMask* Mask = &Canvas->Mask;
     FLAPGraphDrawData Data = {};
     FLAPExportSource Source = {};
     i32 Width = (i32) Image->Width;
@@ -1220,13 +1554,7 @@ CLIExportGraphImage(
         (i32) (Data.PlotX + Data.Width),
         (i32) (Data.PlotY + Data.Height)
     );
-    r1u64 ViewRange = Data.TimeRangeUSecs;
-    u64 Step = (Data.Width && Data.Height)
-        ? Data.StepUSecs
-        : 0;
-    f64 PXPerUSec = Step
-        ? (f64) Data.Width / (f64) Length(ViewRange)
-        : 0.0;
+    b32 HasPlot = (Data.Width && Data.Height && Data.StepUSecs);
 
     FLAPRasterFill(
         Image,
@@ -1239,50 +1567,32 @@ CLIExportGraphImage(
         FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_PLOT)
     );
 
+    CLIGraphTicks Ticks = CLIGraphTicksFromData(&Data);
+
+    if (HasPlot && CLI_SHARED->HasGraphGrid)
+        CLIGraphGrid(Image, &Data, &Ticks, Plot);
+
+    // NOTE(nc): the mask is the plot, so a curve is cut at its edges
+    Mask->Width = Data.Width;
+    Mask->Height = Data.Height;
+
     for (
         u32 CurveIndex = 0;
-        Step && CurveIndex < Data.CurvesCount;
+        HasPlot && CurveIndex < Data.CurvesCount;
         ++CurveIndex
     ) {
-        FLAPGraphDrawCurve* Curve = &Data.Curves[CurveIndex];
-        FLAPGraphColumns const* Columns = Curve->Columns;
-        r1f32 Range = Data.ValueRanges[Curve->Axis];
-        f32 Scale = (f32) (Data.Height - 1) / (Range.Max - Range.Min);
-        u32 Pixel = FLAPRasterPixelFromColour(
-            FLAP_RASTER_CURVE_COLOUR_TABLE[
-                CurveIndex % FLAP_RASTER_CURVE_COLOURS
-            ]
+        FLAPRasterMaskClear(Mask);
+        CLIGraphCurve(Mask, &Data, &Data.Curves[CurveIndex]);
+        FLAPRasterBlendMask(
+            Image,
+            Mask,
+            Vec(Plot.X0, Plot.Y0),
+            FLAPRasterPixelFromColour(
+                FLAP_RASTER_CURVE_COLOUR_TABLE[
+                    CurveIndex % FLAP_RASTER_CURVE_COLOURS
+                ]
+            )
         );
-
-        for (u64 Column = Data.View.Min; Column < Data.View.Max; ++Column) {
-            u64 Slot = 0;
-
-            if (!FLAPGraphColumnHas(Columns, Column, &Slot))
-                continue;
-
-            // NOTE(nc): the middle of the column, from the start of the
-            //         : view. the first column can start before the view.
-            f64 Middle = (
-                (f64) (Column * Step) + 0.5 * (f64) Step - (f64) ViewRange.Min
-            );
-
-            if (Middle < 0.0)
-                continue;
-
-            i32 X = Plot.X0 + (i32) (Middle * PXPerUSec);
-
-            if (X >= Plot.X1)
-                continue;
-
-            i32 Top = Plot.Y0 + (i32) (
-                (Range.Max - Columns->Max[Slot]) * Scale + 0.5f
-            );
-            i32 Bottom = Plot.Y0 + (i32) (
-                (Range.Max - Columns->Min[Slot]) * Scale + 0.5f
-            );
-
-            FLAPRasterFill(Image, Rng(X, Top, X + 1, Bottom + 1), Pixel);
-        }
     }
 
     Source.Pixels = (u8*) Image->Pixels;
@@ -1302,7 +1612,7 @@ INTERNAL b32
 CLIExportDirective(
     Arena* MemPool,
     u8* Chunk,
-    FLAPRasterImage* Image,
+    FLAPRasterCanvas* Canvas,
     Access* Acc,
     CLIFlight* Flight,
     FLIParsed* FLI,
@@ -1343,7 +1653,7 @@ CLIExportDirective(
                     Result = CLIExportGraphImage(
                         MemPool,
                         &Writer,
-                        Image,
+                        Canvas,
                         Acc,
                         Flight,
                         FLI,
@@ -1472,10 +1782,10 @@ CLIRunFlights(Arena* MemPool)
     //         : results go to the arena of the lane.
     Arena* RunMemPool = ArenaAlloc();
     u8* Chunk = ArenaPushArray(MemPool, u8, FLAP_EXPORT_CHUNK_SIZE);
-    FLAPRasterImage Image = {};
+    FLAPRasterCanvas Canvas = {};
 
     if (!CLI_SHARED->IsGraphCSV) {
-        Image = FLAPRasterImageAlloc(
+        Canvas = FLAPRasterCanvasAlloc(
             MemPool,
             (u32) CLI_SHARED->GraphSize.X,
             (u32) CLI_SHARED->GraphSize.Y
@@ -1665,7 +1975,7 @@ CLIRunFlights(Arena* MemPool)
                     b32 IsWritten = CLIExportDirective(
                         MemPool,
                         Chunk,
-                        &Image,
+                        &Canvas,
                         Acc,
                         Flight,
                         &FLI,
@@ -1791,6 +2101,7 @@ CLIEntryPoint(CommandLine* CLI)
             "--graph_width:<n>   The width of a graph image, in pixels.\n\n"
             "--graph_height:<n>  The height of a graph image, in pixels.\n\n"
             "--graph_csv         A graph is written as CSV and not as PNG.\n\n"
+            "--graph_grid        A graph image has a line at each tick.\n\n"
         );
 
         return;
@@ -1840,6 +2151,7 @@ CLIEntryPoint(CommandLine* CLI)
     CLI_SHARED->IsDryRun = CommandLineHasFlag(CLI, "dry_run"_s8);
     CLI_SHARED->DoCompress = !CommandLineHasFlag(CLI, "no_compress"_s8);
     CLI_SHARED->IsGraphCSV = CommandLineHasFlag(CLI, "graph_csv"_s8);
+    CLI_SHARED->HasGraphGrid = CommandLineHasFlag(CLI, "graph_grid"_s8);
     CLI_SHARED->GraphSize = Vec(
         (i32) CLI_GRAPH_WIDTH,
         (i32) CLI_GRAPH_HEIGHT
