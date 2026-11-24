@@ -3598,7 +3598,11 @@ ASYNC_THREAD_FUNC_SIG(EntryPoint)
             }
 
             AtomicExchangeU32(&ASYNC_LOOP_REPEAT, 0, MEM_ORDER_SEQ_CST);
-            AtomicExchangeU32(&ASYNC_LOOP_REPEAT_HIGH_PRIORITY, 0, MEM_ORDER_SEQ_CST);
+            AtomicExchangeU32(
+                &ASYNC_LOOP_REPEAT_HIGH_PRIORITY, 
+                0, 
+                MEM_ORDER_SEQ_CST
+            );
         }
 
         LaneSync();

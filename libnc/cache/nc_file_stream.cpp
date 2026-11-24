@@ -237,7 +237,8 @@ FSKeyFromPathRange(Str8 Path, r1u64 Range, u64 EndTimeUSecs)
         Key, 
         FSObjectAlloc, 
         FSObjectRelease, 
-        EndTimeUSecs
+        EndTimeUSecs,
+        __Params.Generation = Generation
     );
 
     MemCpy(&Result, &Object, sizeof(Result));
