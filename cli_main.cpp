@@ -747,6 +747,9 @@ CLIDirectivePath(
         Ext = "png"_s8;
     }
 
+    if (P->Emits[Head].DisplayKind == TOKEN_KIND_WRITE)
+        Ext = "txt"_s8;
+
     if (!Dir.Size) {
         Dir = StrChopLastSlash(Flight->FLIPath);
 
@@ -756,6 +759,10 @@ CLIDirectivePath(
 
     if (P->Emits[Head].DisplayKind == TOKEN_KIND_TABLE) {
         Kind = "table"_s8;
+    } else if (P->Emits[Head].DisplayKind == TOKEN_KIND_WRITE) {
+        // NOTE(nc): the label of a write is its format, which is no name
+        //         : for a file. the ordinal tells the writes apart.
+        Kind = "write"_s8;
     } else {
         if (P->Emits[Head].DisplayKind == TOKEN_KIND_FLAG)
             Kind = "flag"_s8;
@@ -783,6 +790,51 @@ CLIDirectivePath(
     return Result;
 }
 
+INTERNAL b32
+CLIProgramHasWrites(FLVProgram const* P)
+{
+    b32 Result = FALSE;
+
+    for (u32 Index = 0; Index < P->EmitCount; ++Index) {
+        if (P->Emits[Index].DisplayKind == TOKEN_KIND_WRITE) {
+            Result = TRUE;
+            break;
+        }
+    }
+
+    return Result;
+}
+
+// NOTE(nc): all the writes of a program go to one file, so it has the
+//         : program in its name and no directive.
+INTERNAL Str8
+CLIWritesPath(
+    Arena* MemPool,
+    CLIFlight* Flight,
+    CLIScript* Script,
+    u32 Program
+) {
+    Str8 Dir = CLI_SHARED->OutputPath;
+
+    if (!Dir.Size) {
+        Dir = StrChopLastSlash(Flight->FLIPath);
+
+        if (Dir.Size == Flight->FLIPath.Size)
+            Dir = "."_s8;
+    }
+
+    Str8 Result = ArenaPushStrFmt(
+        MemPool,
+        "%S/%S.%S.p%u.write.txt",
+        PRINT_STR(Dir),
+        PRINT_STR(StrChopLastDot(StrSkipLastSlash(Flight->FLIPath))),
+        PRINT_STR(StrChopLastDot(StrSkipLastSlash(Script->Path))),
+        Program
+    );
+
+    return Result;
+}
+
 // NOTE(nc): a program is fresh when all of its files are there and are
 //         : newer than the flight and the FLV they are made from.
 INTERNAL b32
@@ -803,6 +855,9 @@ CLIProgramIsFresh(
         Result && Head < P->EmitCount;
         Head = CLIDirectiveTail(P, Head), ++Ordinal
     ) {
+        if (P->Emits[Head].DisplayKind == TOKEN_KIND_WRITE)
+            continue;
+
         FileProperties Props = SystemGetFileProperties(
             CLIDirectivePath(
                 MemPool,
@@ -813,6 +868,14 @@ CLIProgramIsFresh(
                 Head,
                 Ordinal
             )
+        );
+
+        Result = (Props.Modified > SourceTime);
+    }
+
+    if (Result && CLIProgramHasWrites(P)) {
+        FileProperties Props = SystemGetFileProperties(
+            CLIWritesPath(MemPool, Flight, Script, Program)
         );
 
         Result = (Props.Modified > SourceTime);
@@ -955,6 +1018,20 @@ CLIExportFlag(
             );
             ArenaPopTo(MemPool, RowPosition);
         }
+    }
+
+    return TRUE;
+}
+
+// NOTE(nc): the line of the write, as the view shows it. a write that is
+//         : missing, or is in a branch that was not taken, has an empty
+//         : file, so that its program is still fresh.
+INTERNAL b32
+CLIExportWrite(FLAPExportWriter* Writer, FLVRenderItem const* Item)
+{
+    if (!Item->IsMissing && Item->Kind == FLV_RENDER_KIND_TEXT) {
+        FLAPExportWrite(Writer, Item->Text);
+        FLAPExportWrite(Writer, "\n"_s8);
     }
 
     return TRUE;
@@ -2017,6 +2094,60 @@ CLIExportGraphImage(
     return Result;
 }
 
+// NOTE(nc): the lines of the writes of a program, in the order of the
+//         : source. a write that is missing, or is in a branch that was
+//         : not taken, has no line. the file is made with another name
+//         : and moved, as CLIExportDirective does.
+INTERNAL b32
+CLIExportWrites(
+    Arena* MemPool,
+    u8* Chunk,
+    FLVProgram const* P,
+    FLVRenderItem const* Items,
+    Str8 FilePath
+) {
+    b32 Result = FALSE;
+    u64 Position = ArenaGetPosition(MemPool);
+    Str8 TempPath = ArenaPushStrFmt(MemPool, "%S.tmp", PRINT_STR(FilePath));
+    FLAPExportWriter Writer = {};
+
+    Writer.File = SystemOpenFile(SYS_ACCESS_WRITE, TempPath);
+
+    if (Writer.File != EMPTY_HANDLE_VALUE) {
+        Writer.Capacity = FLAP_EXPORT_CHUNK_SIZE;
+        Writer.Chunk = Chunk;
+
+        for (u32 Index = 0; Index < P->EmitCount; ++Index) {
+            FLVRenderItem const* Item = &Items[Index];
+
+            if (
+                P->Emits[Index].DisplayKind != TOKEN_KIND_WRITE ||
+                Item->IsMissing ||
+                Item->Kind != FLV_RENDER_KIND_TEXT
+            ) {
+                continue;
+            }
+
+            FLAPExportWrite(&Writer, Item->Text);
+            FLAPExportWrite(&Writer, "\n"_s8);
+        }
+
+        FLAPExportFlush(&Writer);
+        Result = !Writer.HasFailed;
+        SystemCloseFile(Writer.File);
+
+        if (Result)
+            Result = SystemMoveFile(FilePath, TempPath);
+
+        if (!Result)
+            SystemDeleteFile(TempPath);
+    }
+
+    ArenaPopTo(MemPool, Position);
+
+    return Result;
+}
+
 // NOTE(nc): the file is made with another name and is moved to its name
 //         : when it is whole, so a run that is stopped leaves no result
 //         : that looks fresh.
@@ -2093,6 +2224,10 @@ CLIExportDirective(
                     Head,
                     Tail
                 );
+            } break;
+
+            case TOKEN_KIND_WRITE: {
+                Result = CLIExportWrite(&Writer, &Items[Head]);
             } break;
         }
 
@@ -2375,6 +2510,13 @@ CLIRunFlights(Arena* MemPool)
 
                 for (u32 Head = 0; Head < P->EmitCount; ++Ordinal) {
                     u32 Tail = CLIDirectiveTail(P, Head);
+
+                    // NOTE(nc): the writes go to the file of the program
+                    if (P->Emits[Head].DisplayKind == TOKEN_KIND_WRITE) {
+                        Head = Tail;
+                        continue;
+                    }
+
                     Str8 Path = CLIDirectivePath(
                         MemPool,
                         Flight,
@@ -2412,6 +2554,30 @@ CLIRunFlights(Arena* MemPool)
                     }
 
                     Head = Tail;
+                }
+
+                if (CLIProgramHasWrites(P)) {
+                    Str8 Path = CLIWritesPath(MemPool, Flight, S, Program);
+                    b32 IsWritten = CLIExportWrites(
+                        MemPool,
+                        Chunk,
+                        P,
+                        Lane.Items,
+                        Path
+                    );
+
+                    if (IsWritten) {
+                        AtomicIncFetchU64(
+                            &CLI_SHARED->ExportedCount,
+                            MEM_ORDER_SEQ_CST
+                        );
+                    } else {
+                        AtomicIncFetchU64(
+                            &CLI_SHARED->FailCount,
+                            MEM_ORDER_SEQ_CST
+                        );
+                        PrintErr("failed to write %S\n", PRINT_STR(Path));
+                    }
                 }
 
                 AccessClose(Acc);
