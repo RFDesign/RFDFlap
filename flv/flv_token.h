@@ -67,7 +67,7 @@ enum : u8 {
     TOKEN_KIND_VAR                = 3,
     TOKEN_KIND_GRAPH              = 4,
     TOKEN_KIND_TABLE              = 5,
-    TOKEN_KIND_TEXT               = 6,
+    TOKEN_KIND_WRITE              = 6,
     TOKEN_KIND_FLAG               = 7,
     TOKEN_KIND_IF                 = 8,
     TOKEN_KIND_ELSE               = 9,

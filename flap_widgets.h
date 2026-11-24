@@ -24,6 +24,8 @@
 #define FLAP_GPS_WEEK_SECS        604800ULL
 #define FLAP_GPS_LEAP_SECS        18ULL
 #define FLAP_DAY_SECS             86400ULL
+#define FLAP_GRAPH_VALUE_ZOOM_MIN 1.0e-5f
+#define FLAP_GRAPH_PLOT_PAD_PX    65536.0f
 
 typedef u32 FLAPGraphCaptureKind;
 enum : u32 {

@@ -246,7 +246,8 @@ EmitOp(LowerState* State, u16 Kernel, FLVOperand LHS, FLVOperand RHS)
         if (
             !Region || 
             Region->Kind != FLV_REGION_KIND_SCALAR || 
-            Region->HeadOp + Region->OpCount != State->OpCount
+            Region->HeadOp + Region->OpCount != State->OpCount ||
+            State->RegionCount <= State->ScalarBarrier
         ) {
             Region = RegionPush(State, FLV_REGION_KIND_SCALAR);
         }
@@ -1425,7 +1426,7 @@ ReductionKernel(u16 ID, b32 IsF64)
                 : FLV_KERNEL_LAST_I64; 
         } break;
 
-        case FLV_STDLIB_ID_COUNT: { 
+        case FLV_STDLIB_ID_LENGTH: { 
             Result = FLV_KERNEL_REDUCE_COUNT; 
         } break;
     }
@@ -1499,7 +1500,7 @@ LowerCall(LowerState* State, ASTNodeFuncCall* Call, ExprIndex Self)
         case FLV_STDLIB_ID_MAX:
         case FLV_STDLIB_ID_SUM:
         case FLV_STDLIB_ID_STDDEV:
-        case FLV_STDLIB_ID_COUNT:
+        case FLV_STDLIB_ID_LENGTH:
         case FLV_STDLIB_ID_HEAD:
         case FLV_STDLIB_ID_TAIL: {
             RegionOpen(State, BaseOf(TypeOf(State, Head)));
@@ -1803,6 +1804,19 @@ LowerGraph(LowerState* State, ASTNodeDisplay* Display)
             continue;
         }
 
+        if (
+            !IsKind(Type, TYPE_KIND_SERIES) &&
+            !IsKind(Type, TYPE_KIND_MESSAGE)
+        ) {
+            LOWER_ERROR(
+                State,
+                &Display->Header,
+                "graph() takes a series, and this argument is a single value"
+            );
+            EmitMissing(State, TOKEN_KIND_GRAPH, Label);
+            continue;
+        }
+
         RegionOpen(State, BaseOf(Type));
 
         LowerValue Value = LowerExpr(State, Arg->Expr);
@@ -1944,6 +1958,27 @@ LowerTable(LowerState* State, ASTNodeDisplay* Display)
         return;
     }
 
+    if (!IsKind(FirstType, TYPE_KIND_SERIES)) {
+        LOWER_ERROR(
+            State,
+            &Display->Header,
+            "table() takes a message or a series, and its first argument is a single value"
+        );
+
+        for (u32 Index = 0; Index < Count; ++Index) {
+            EmitMissing(
+                State,
+                TOKEN_KIND_TABLE,
+                ArgLabel(
+                    State,
+                    &Display->Arg[Index]
+                )
+            );
+        }
+
+        return;
+    }
+
     RegionOpen(State, BaseOf(FirstType));
 
     for (u32 Index = 0; Index < Count; ++Index) {
@@ -2056,12 +2091,64 @@ LowerFlag(LowerState* State, ASTNodeDisplay* Display)
 }
 
 internal void
+LowerWrite(LowerState* State, ASTNodeDisplay* Display)
+{
+    ++State->TableGroup;
+
+    ASTDisplayArg* Head = &Display->Arg[0];
+
+    if (!Head->IsLabel || State->Missing) {
+        EmitMissing(State, TOKEN_KIND_WRITE, ArgLabel(State, Head));
+
+        return;
+    }
+
+    ASTNodeLiteral* Lit = (ASTNodeLiteral*) ExprAt(State, Head->Expr);
+    FLVOperand Emit = (FLVOperand) EmitAdd(
+        State,
+        TOKEN_KIND_WRITE,
+        1,
+        FLV_ELEMENT_KIND_NONE,
+        Str(
+            Lit->Val.String.Str,
+            Lit->Val.String.Count
+        )
+    );
+
+    // NOTE(nc): one op for each value, in the order of the format, and
+    //         : then the op that makes the line. a value that is not a
+    //         : single value takes its place as a missing one.
+    for (u32 Index = 1; Index < Display->Header.Count; ++Index) {
+        LowerValue Value = LowerExpr(State, Display->Arg[Index].Expr);
+        u16 Kernel = FLV_KERNEL_EMIT_WRITE_NONE;
+
+        if (Value.Kind == FLV_ELEMENT_KIND_SINGLE_I64)
+            Kernel = FLV_KERNEL_EMIT_WRITE_I64;
+        else if (Value.Kind == FLV_ELEMENT_KIND_SINGLE_F64)
+            Kernel = FLV_KERNEL_EMIT_WRITE_F64;
+
+        EmitOp(
+            State,
+            Kernel,
+            (Kernel == FLV_KERNEL_EMIT_WRITE_NONE)
+                ? (FLVOperand) FLV_OPERAND_NONE
+                : Value.Op,
+            Emit
+        );
+    }
+
+    EmitOp(State, FLV_KERNEL_EMIT_WRITE, FLV_OPERAND_NONE, Emit);
+}
+
+internal void
 LowerDisplay(LowerState* State, ASTNodeDisplay* Display)
 {
     switch (Display->Header.Variant) {
         default: {} break;
 
-        case TOKEN_KIND_TEXT: {} break;
+        case TOKEN_KIND_WRITE: {
+            LowerWrite(State, Display);
+        } break;
 
         case TOKEN_KIND_GRAPH: {
             LowerGraph(State, Display);
@@ -2164,6 +2251,7 @@ ProgramBegin(LowerState* State)
     State->EmitCount = 0;
     State->StringCount = 0;
     State->TempCount = 0;
+    State->ScalarBarrier = 0;
     MemZero(State->TempFreeCount, sizeof(State->TempFreeCount));
     State->VarCount = 0;
     State->Missing = 0;
@@ -2259,10 +2347,13 @@ LowerBranch(
 
         RegionPush(State, FLV_REGION_KIND_JUMP);
         State->Regions[JumpIndex].Target = (u16) State->RegionCount;
+        State->ScalarBarrier = State->RegionCount;
         *Next = LowerStmt(State, *Next, LayoutNode);
         State->Regions[SkipElse].Target = (u16) State->RegionCount;
+        State->ScalarBarrier = State->RegionCount;
     } else {
         State->Regions[JumpIndex].Target = (u16) State->RegionCount;
+        State->ScalarBarrier = State->RegionCount;
     }
 }
 

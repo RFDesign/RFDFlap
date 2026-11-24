@@ -32,6 +32,8 @@ enum : u16 {
 #define FLV_OPERAND_INDEX_MASK 0x3FFFU
 #define FLV_OPERAND_NONE       0xFFFFU
 
+#define FLV_WRITE_CONVERSION_INVALID 0xFF
+
 #define FLV_KERNEL_FLAG_RUN       (1 << 0)
 #define FLV_KERNEL_FLAG_SCALAR    (1 << 1)
 #define FLV_KERNEL_FLAG_REDUCTION (1 << 2)
@@ -196,7 +198,11 @@ enum : u16 {
     X(EMIT_TABLE_COLUMN,   1, NONE,       FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_EMIT)                             \
     X(EMIT_FLAG,           1, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
     X(EMIT_FLAG_SCALAR,    1, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
-    X(EMIT_MISSING,        0, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)
+    X(EMIT_MISSING,        0, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
+    X(EMIT_WRITE_I64,      1, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
+    X(EMIT_WRITE_F64,      1, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
+    X(EMIT_WRITE_NONE,     0, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
+    X(EMIT_WRITE,          0, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
 
 #define X(Name, Inputs, Dst, Flags) FLV_KERNEL_##Name,
 
@@ -291,6 +297,26 @@ struct FLVEmitBuild {
     u32            Width;
 };
 
+struct FLVWriteSpec {
+    Str8 Literal;
+    i32  Width;
+    i32  Precision;
+    b32  HaveMinus;
+    b32  HavePlus;
+    b32  HaveSpace;
+    b32  HaveHash;
+    b32  HaveZero;
+    u8   Conversion;
+    u8   __Padding[3];
+};
+
+struct FLVWriteValue {
+    FLVNumber V;
+    u8        Kind;
+    u8        IsMissing;
+    u8        __Padding[6];
+};
+
 // @defines____________________________________________________________________
 #define FLV_KERNEL_FUNC_SIG(X) void X(FLVLane* Lane, FLVOp Op)
 typedef FLV_KERNEL_FUNC_SIG(FLVKernelFuncType);
@@ -330,6 +356,106 @@ INTERNAL u32
 FLVGetOperandIndex(FLVOperand Operand)
 {
     return Operand & FLV_OPERAND_INDEX_MASK;
+}
+
+// NOTE(nc): the next part of a write format, read as __VSNPrintf reads a
+//         : format: the text up to a %, the flags, the width, the
+//         : precision and the conversion. Conversion is 0 for text alone,
+//         : as at the end of the format and for %%, which is one % of the
+//         : text. a * is not legal, since a write has no argument for it.
+INTERNAL b32
+FLVWriteSpecNext(Str8 Format, u64* Offset, OUT FLVWriteSpec* Spec)
+{
+    u8 const* FmtPtr = Format.Str + *Offset;
+    u8 const* FmtEnd = Format.Str + Format.Size;
+    u8 const* NextSpecifier = FmtPtr;
+
+    *Spec = {};
+    Spec->Precision = -1;
+
+    if (FmtPtr >= FmtEnd)
+        return FALSE;
+
+    while (NextSpecifier < FmtEnd && *NextSpecifier != '%')
+        ++NextSpecifier;
+
+    Spec->Literal = Str((u8*) FmtPtr, (u64) (NextSpecifier - FmtPtr));
+    FmtPtr = NextSpecifier;
+
+    if (FmtPtr < FmtEnd) {
+        ++FmtPtr;
+
+        if (FmtPtr < FmtEnd && *FmtPtr == '%') {
+            ++Spec->Literal.Size;
+            ++FmtPtr;
+        } else {
+            while (FmtPtr < FmtEnd) {
+                const u8 CurrFmt = *FmtPtr;
+
+                if (CurrFmt == '-')
+                    Spec->HaveMinus = TRUE;
+                else if (CurrFmt == '+')
+                    Spec->HavePlus = TRUE;
+                else if (CurrFmt == ' ')
+                    Spec->HaveSpace = TRUE;
+                else if (CurrFmt == '#')
+                    Spec->HaveHash = TRUE;
+                else if (CurrFmt == '0')
+                    Spec->HaveZero = TRUE;
+                else
+                    break;
+
+                ++FmtPtr;
+            }
+
+            while (FmtPtr < FmtEnd && IsDigit(*FmtPtr)) {
+                Spec->Width = Spec->Width * 10 + (*FmtPtr - '0');
+                ++FmtPtr;
+            }
+
+            if (FmtPtr < FmtEnd && *FmtPtr == '.') {
+                ++FmtPtr;
+                Spec->Precision = 0;
+
+                while (FmtPtr < FmtEnd && IsDigit(*FmtPtr)) {
+                    Spec->Precision = Spec->Precision * 10 + (*FmtPtr - '0');
+                    ++FmtPtr;
+                }
+            }
+
+            // NOTE(nc): a value of a write is 64 bits, so a length says
+            //         : nothing. it is read so that %lld is legal.
+while (
+                FmtPtr < FmtEnd &&
+                (
+                    *FmtPtr == 'h' ||
+                    *FmtPtr == 'l' ||
+                    *FmtPtr == 'z'
+                )
+            ) {
+                ++FmtPtr;
+            }
+
+            Spec->Conversion = FLV_WRITE_CONVERSION_INVALID;
+
+            if (FmtPtr < FmtEnd) {
+                u8 C = *FmtPtr++;
+
+                if (
+                    C == 'd' || C == 'i' || C == 'f' ||
+                    C == 'F' || C == 'm' || C == 't'
+                ) {
+                    Spec->Conversion = C;
+                } else {
+                    Spec->Width = (i32) C;
+                }
+            }
+        }
+    }
+
+    *Offset = (u64) (FmtPtr - Format.Str);
+
+    return TRUE;
 }
 
 #endif // __FLV_KERNEL_H__

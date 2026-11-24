@@ -55,6 +55,13 @@ struct OCRequestNode {
     OCRequest      V;
 };
 
+struct OCRetired {
+    OCRetired* Next;
+    OCObject   V;
+    b32        IsUsed;
+    u32        __Padding;
+};
+
 struct OCNode {
     OCNode*     Next;
     OCNode*     Prev;
@@ -67,7 +74,7 @@ struct OCNode {
     u64         CompletionCount;
     u64         EvictionThresholdUSecs;
     b32         Cancelled;
-    u64         __Reserved;
+    OCRetired*  Retired;
 };
 
 struct OCSlot {

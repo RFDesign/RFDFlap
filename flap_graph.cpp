@@ -96,7 +96,7 @@ FLAPGraphSampleValue(
             ];
         } else {
             *SampleValue = (f32) FLVColumnF64At(Value, Sample);
-            Result = (*SampleValue == *SampleValue);
+            Result = (*SampleValue * 0.0f == 0.0f);
         }
     }
 
@@ -179,7 +179,7 @@ FLAPGraphReduceSamples(
 
             f32 V = (f32) FLVColumnF64At(Value, Index);
 
-            if (V != V) {
+            if (V * 0.0f != 0.0f) {
                 IsBroken = TRUE;
                 continue;
             }

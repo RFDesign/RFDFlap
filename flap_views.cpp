@@ -384,6 +384,35 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
 
         Rect.Y0 += RowHeight;
 
+        // NOTE(nc): the lines of the write directives, above what the
+        //         : analysis shows. a write that did not run has no line.
+        for (
+            u32 Index = 0;
+            Items && Index < Program->EmitCount;
+            ++Index
+        ) {
+            if (
+                Program->Emits[Index].DisplayKind != TOKEN_KIND_WRITE ||
+                Items[Index].Kind != FLV_RENDER_KIND_TEXT
+            ) {
+                continue;
+            }
+
+            // NOTE(nc): no room for more lines
+            if (Length(Rect).Y < 2.0f * RowHeight)
+                break;
+
+            UIWidthFill() {
+                UILabel(
+                    "%S###write_%u",
+                    PRINT_STR(Items[Index].Text),
+                    Index
+                );
+            }
+
+            Rect.Y0 += RowHeight;
+        }
+
         if (!Items) {
             UITag("weak"_s8) {
                 UIWidthFill() {

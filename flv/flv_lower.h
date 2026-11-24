@@ -179,6 +179,7 @@ struct LowerState {
     u32              FilterDepth;
     u32              CtxDepth;
     u32              Missing;
+    u32              ScalarBarrier;
     LowerRegion*     Region;
     b32              InAnalysis;
     b32              HasError;

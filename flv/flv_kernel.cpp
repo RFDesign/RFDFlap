@@ -1646,10 +1646,10 @@ FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_CURVE)
         if (Lane->Mask && !FLVMaskBit(Lane->Mask, Index))
             continue;
 
-        if (V != V)
-            continue;
-
         f32 Stored = (f32) V;
+
+        if (Stored * 0.0f != 0.0f)
+            continue;
 
         FLVMaskSetBit(Curve->Mask, Position + Index);
         FLVEmitBuildPush(Lane, Build, &Stored, sizeof(Stored));
@@ -1709,6 +1709,306 @@ FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_FLAG_SCALAR)
     Flag->TotalDurationUSecs = IsSet ? Lane->FlightEndUSecs : 0;
     Flag->LabelStringIndex = Emit->LabelStringIndex;
     Flag->Ranges[0] = Rng((u64) 0, Lane->FlightEndUSecs);
+}
+
+INTERNAL void
+FLVWriteValuePush(FLVLane* Lane, FLVOp Op, u8 Kind)
+{
+    FLVWriteValue Value = {};
+
+    Value.Kind = Kind;
+    Value.IsMissing = (
+        Kind == FLV_ELEMENT_KIND_NONE ||
+        FLVTempIsMissing(Lane, Op.LHS)
+    );
+
+    if (!Value.IsMissing) {
+        if (Kind == FLV_ELEMENT_KIND_SINGLE_F64)
+            Value.V.F64 = FLVScalarF64(Lane, Op.LHS);
+        else
+            Value.V.I64 = FLVScalarI64(Lane, Op.LHS);
+    }
+
+    FLVEmitBuildPush(
+        Lane,
+        &Lane->EmitBuilds[FLVGetOperandIndex(Op.RHS)],
+        &Value,
+        sizeof(Value)
+    );
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_WRITE_I64)
+{
+    FLVWriteValuePush(Lane, Op, FLV_ELEMENT_KIND_SINGLE_I64);
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_WRITE_F64)
+{
+    FLVWriteValuePush(Lane, Op, FLV_ELEMENT_KIND_SINGLE_F64);
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_WRITE_NONE)
+{
+    FLVWriteValuePush(Lane, Op, FLV_ELEMENT_KIND_NONE);
+}
+
+// NOTE(nc): the name of a mode, from the table of the vehicle of the
+//         : flight. a mode that the table does not have is its number.
+INTERNAL Str8
+FLVWriteModeName(FLVLane* Lane, i64 Number)
+{
+    u64 InfoCount = 0;
+    FLIFileInfo* Infos = FLITableFromName(
+        Lane->FLI,
+        FileInfo,
+        FILE_INFO,
+        &InfoCount
+    );
+    FLVVehicleKind VehicleKind = FLV_VEHICLE_KIND_UNKNOWN;
+    Str8 Result = {};
+
+    if (InfoCount) {
+        u64 Length = 0;
+        u8* Base = FLIStrFromIndex(
+            Lane->FLI,
+            Infos[InfoCount - 1].VehicleStringIndex,
+            &Length
+        );
+
+        VehicleKind = FLVVehicleKindFromStr(Str(Base, Length));
+    }
+
+    if (VehicleKind < FLV_VEHICLE_KIND_COUNT) {
+        FLVModeName const* Names = FLV_MODE_TABLE[VehicleKind];
+
+        for (u32 Index = 0; Index < FLV_MODE_TABLE_COUNT[VehicleKind]; ++Index) {
+            if ((i64) Names[Index].Number == Number) {
+                Result = Names[Index].Name;
+                break;
+            }
+        }
+    }
+
+    if (!Result.Size)
+        Result = ArenaPushStrFmt(Lane->MemPool, "MODE %lld", Number);
+
+    return Result;
+}
+
+
+#define __VSN_WRITE_CHAR(X) do {                        \
+    if ((u64) (BufferPtr - Buffer) < BufferCapacity) {  \
+        *BufferPtr = X;                                 \
+    }                                                   \
+    ++BufferPtr;                                        \
+    ++Result;                                           \
+} while (FALSE)
+
+#define __VSN_WRITE_STR(X, Y) do {                                                                        \
+    u64 BufferAvailable = !(BufferPtr > Buffer + BufferCapacity) * (Buffer + BufferCapacity - BufferPtr); \
+    u64 BufferToWrite = MIN(Y, BufferAvailable);                                                          \
+    if (BufferToWrite)                                                                                    \
+        MemCpy(BufferPtr, X, BufferToWrite * sizeof(*BufferPtr));                                         \
+    BufferPtr += Y;                                                                                       \
+    Result += Y;                                                                                          \
+} while (FALSE)
+
+// NOTE(nc): the line of a write, made as __VSNPrintf makes a string: with
+//         : no buffer it counts the characters, and with a buffer it
+//         : writes them. the values come from the build of the write, in
+//         : the order of the format, and not from a va_list.
+INTERNAL i32
+FLVWritePrint(
+    FLVLane* Lane,
+    u8* Buffer,
+    u64 BufferCount,
+    Str8 Format,
+    FLVWriteValue const* Values,
+    u64 ValuesCount
+) {
+    i32 Result = 0;
+    u8* BufferPtr = Buffer;
+    const u64 BufferCapacity = !!Buffer * BufferCount;
+    FLVWriteSpec Spec = {};
+    u64 Offset = 0;
+    u64 ValueIndex = 0;
+
+    while (FLVWriteSpecNext(Format, &Offset, &Spec)) {
+        if (Spec.Literal.Size)
+            __VSN_WRITE_STR(Spec.Literal.Str, Spec.Literal.Size);
+
+        if (!Spec.Conversion)
+            continue;
+
+        if (Spec.Conversion == FLV_WRITE_CONVERSION_INVALID) {
+            __VSN_WRITE_CHAR('%');
+
+            if (Spec.Width)
+                __VSN_WRITE_CHAR((u8) Spec.Width);
+
+            continue;
+        }
+
+        FLVWriteValue const* Value = (ValueIndex < ValuesCount)
+            ? &Values[ValueIndex]
+            : NULL;
+        b32 IsF64 = (Value && Value->Kind == FLV_ELEMENT_KIND_SINGLE_F64);
+        i64 Whole = 0;
+        f64 Real = 0.0;
+        Str8 String = "-"_s8;
+        b32 IsString = TRUE;
+
+        ++ValueIndex;
+
+        if (Value && !Value->IsMissing) {
+            Whole = IsF64 ? (i64) Value->V.F64 : Value->V.I64;
+            Real = IsF64 ? Value->V.F64 : (f64) Value->V.I64;
+
+            // NOTE(nc): a duration is microseconds, and is written in
+            //         : seconds
+            if (Spec.Conversion == 't')
+                Real = (f64) Whole / 1000000.0;
+
+            // NOTE(nc): a NaN is a value that is missing
+            if (Real == Real) {
+                IsString = (Spec.Conversion == 'm');
+
+                if (IsString)
+                    String = FLVWriteModeName(Lane, Whole);
+            }
+        }
+
+        if (IsString) {
+            i32 Len = (i32) String.Size;
+
+            if (Spec.Width > Len && !Spec.HaveMinus)
+                for (i32 Index = 0; Index < Spec.Width - Len; ++Index)
+                    __VSN_WRITE_CHAR(' ');
+
+            __VSN_WRITE_STR(String.Str, Len);
+
+            if (Spec.Width > Len && Spec.HaveMinus)
+                for (i32 Index = 0; Index < Spec.Width - Len; ++Index)
+                    __VSN_WRITE_CHAR(' ');
+
+            continue;
+        }
+
+        switch (Spec.Conversion) {
+            default: {} break;
+
+            case 'd':
+            case 'i': {
+                char TempBuffer[32];
+                char* ValString = TempBuffer + sizeof(TempBuffer);
+                b32 Negative = (Whole < 0);
+                u64 UnsignedVal = (Negative) ? -(u64) Whole : (u64) Whole;
+
+                ValString = U64ToCStr(UnsignedVal, ValString);
+
+                i32 ValLen = (i32) (
+                    (TempBuffer + sizeof(TempBuffer) - 1) - ValString
+                );
+                i32 TotalLen = ValLen + (
+                    Negative || Spec.HavePlus || Spec.HaveSpace
+                );
+
+                if (!Spec.HaveMinus && !Spec.HaveZero && Spec.Width > TotalLen)
+                    for (i32 Index = 0; Index < Spec.Width - TotalLen; ++Index)
+                        __VSN_WRITE_CHAR(' ');
+
+                if (Negative)
+                    __VSN_WRITE_CHAR('-');
+                else if (Spec.HavePlus)
+                    __VSN_WRITE_CHAR('+');
+                else if (Spec.HaveSpace)
+                    __VSN_WRITE_CHAR(' ');
+
+                if (!Spec.HaveMinus && Spec.HaveZero && Spec.Width > TotalLen)
+                    for (i32 Index = 0; Index < Spec.Width - TotalLen; ++Index)
+                        __VSN_WRITE_CHAR('0');
+
+                __VSN_WRITE_STR(ValString, ValLen);
+
+                if (Spec.HaveMinus && Spec.Width > TotalLen)
+                    for (i32 Index = 0; Index < Spec.Width - TotalLen; ++Index)
+                        __VSN_WRITE_CHAR(' ');
+            } break;
+
+            case 'f':
+            case 'F': 
+            case 't': {
+                i32 Precision = (Spec.Precision < 0) ? 6 : Spec.Precision;
+                char TempBuffer[128];
+                b32 IsNegative = (Real < 0.0);
+                i64 IntPart = (i64) Real;
+                f64 FracPart = AbsF64(Real - (f64) IntPart);
+                char* Ptr = U64ToCStr(
+                    (u64) Abs64(IntPart),
+                    TempBuffer + 64
+                );
+
+                if (IsNegative)
+                    __VSN_WRITE_CHAR('-');
+
+                __VSN_WRITE_STR(Ptr, (TempBuffer + 64 - 1) - Ptr);
+
+                if (Precision > 0) {
+                    __VSN_WRITE_CHAR('.');
+
+                    for (i32 Index = 0; Index < Precision; ++Index) {
+                        FracPart *= 10;
+
+                        i32 Digit = (i32) FracPart;
+
+                        __VSN_WRITE_CHAR('0' + Digit);
+                        FracPart -= Digit;
+                    }
+                }
+            } break;
+        }
+    }
+
+    if (Buffer && BufferCount) {
+        u64 FinalPosition = BufferPtr - Buffer;
+
+        if (FinalPosition < BufferCount) {
+            Buffer[FinalPosition] = 0;
+        } else {
+            Buffer[BufferCount - 1] = 0;
+        }
+    }
+
+    return Result;
+}
+
+#undef __VSN_WRITE_CHAR
+#undef __VSN_WRITE_STR
+
+// NOTE(nc): the values of the write are in its build, in the order of the
+//         : format. the line is made one time, here, so a view only shows
+//         : a string.
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_WRITE)
+{
+    u32 EmitIndex = FLVGetOperandIndex(Op.RHS);
+    FLVEmit const* Emit = &Lane->Program->Emits[EmitIndex];
+    FLVRenderItem* Item = &Lane->Items[EmitIndex];
+    FLVEmitBuild* Build = &Lane->EmitBuilds[EmitIndex];
+    FLVWriteValue const* Values = Build->Head
+        ? (FLVWriteValue const*) Build->Head->V
+        : NULL;
+    u64 ValuesCount = Build->ByteCount / sizeof(FLVWriteValue);
+    Str8 Format = Lane->Program->Strings[Emit->LabelStringIndex];
+    i32 Size = FLVWritePrint(Lane, NULL, 0, Format, Values, ValuesCount);
+    u8* Buffer = ArenaPushArray(Lane->ResultMemPool, u8, (u64) Size + 1);
+
+    FLVWritePrint(Lane, Buffer, (u64) Size + 1, Format, Values, ValuesCount);
+    Item->Kind = FLV_RENDER_KIND_TEXT;
+    Item->Text = Str(Buffer, (u64) Size);
 }
 
 INTERNAL

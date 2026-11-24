@@ -950,6 +950,48 @@ FLAPGraphModeName(
     return Result;
 }
 
+// NOTE(nc): a value far from the range is far from the plot. it is put at
+//         : a fixed distance from the plot, so the renderer never gets a
+//         : shape that is millions of pixels high. the clip cuts it the
+//         : same.
+INTERNAL f32
+FLAPGraphPlotY(r2f32 PlotRect, f32 RangeMax, f32 Scale, f32 Value)
+{
+    f32 Result = PlotRect.Y0 + (RangeMax - Value) * Scale + 0.5f;
+
+    Result = CLAMP(
+        PlotRect.Y0 - FLAP_GRAPH_PLOT_PAD_PX,
+        Result,
+        PlotRect.Y1 + FLAP_GRAPH_PLOT_PAD_PX
+    );
+
+    return Result;
+}
+
+// NOTE(nc): a value range is zoomed about its middle. a zoom in stops when
+//         : the range is too small next to its middle, so the labels of
+//         : the axis are always different numbers. a zoom out is always
+//         : taken.
+INTERNAL b32
+FLAPGraphZoomValueRange(r1f32 Range, f32 Factor, OUT r1f32* Result)
+{
+    f32 Middle = 0.5f * (Range.Min + Range.Max);
+    f32 Half = 0.5f * (Range.Max - Range.Min) * Factor;
+    b32 IsValid = (
+        Half * 0.0f == 0.0f &&
+        Middle - Half < Middle + Half &&
+        (
+            Factor >= 1.0f ||
+            Half >= AbsF32(Middle) * FLAP_GRAPH_VALUE_ZOOM_MIN
+        )
+    );
+
+    if (IsValid)
+        *Result = Rng(Middle - Half, Middle + Half);
+
+    return IsValid;
+}
+
 INTERNAL
 UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
 {
@@ -1164,6 +1206,10 @@ UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
                 FLAPGraphColumns const* Columns = Curve->Columns;
                 r1f32 Range = Data->ValueRanges[Curve->Axis];
                 f32 Scale = (f32) (Height - 1) / (Range.Max - Range.Min);
+
+                if (Scale * 0.0f != 0.0f)
+                    continue;
+
                 b32 HasMarkers = (
                     Curve->Samples &&
                     (f32) Curve->Samples * Metrics.MarkerSpacing <= (f32) Width
@@ -1186,7 +1232,7 @@ UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
                     PrevEdgeX = (f64) PlotRect.X0 + (
                         (f64) Columns->Lead.TimeUSecs - (f64) ViewRange.Min
                     ) * PXPerUSec;
-                    PrevLast = PlotRect.Y0 + (Range.Max - Columns->Lead.Value) * Scale + 0.5f;
+                    PrevLast = FLAPGraphPlotY(PlotRect, Range.Max, Scale, Columns->Lead.Value);
                     HasPrev = TRUE;
                     IsPrevEdge = TRUE;
                 }
@@ -1209,10 +1255,10 @@ UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
                             (i64) (Column * Step) - (i64) ViewRange.Min
                         ) * PXPerUSec
                     ) + Offset * ColumnPX;
-                    f32 Top = PlotRect.Y0 + (Range.Max - Columns->Max[Slot]) * Scale + 0.5f;
-                    f32 Bottom = PlotRect.Y0 + (Range.Max - Columns->Min[Slot]) * Scale + 0.5f;
-                    f32 First = PlotRect.Y0 + (Range.Max - Columns->First[Slot]) * Scale + 0.5f;
-                    f32 Last = PlotRect.Y0 + (Range.Max - Columns->Last[Slot]) * Scale + 0.5f;
+                    f32 Top = FLAPGraphPlotY(PlotRect, Range.Max, Scale, Columns->Max[Slot]);
+                    f32 Bottom = FLAPGraphPlotY(PlotRect, Range.Max, Scale, Columns->Min[Slot]);
+                    f32 First = FLAPGraphPlotY(PlotRect, Range.Max, Scale, Columns->First[Slot]);
+                    f32 Last = FLAPGraphPlotY(PlotRect, Range.Max, Scale, Columns->Last[Slot]);
                     b32 IsJoined = (
                         HasPrev &&
                         (Columns->Join[Slot >> 6] & (1ULL << (Slot & 63))) != 0
@@ -1372,7 +1418,7 @@ UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
                             (f64) Curve->HoverTimeUSecs - (f64) ViewRange.Min
                         ) * PXPerUSec
                     );
-                    f32 HoverY = PlotRect.Y0 + (Range.Max - Curve->HoverValue) * Scale + 0.5f;
+                    f32 HoverY = FLAPGraphPlotY(PlotRect, Range.Max, Scale, Curve->HoverValue);
 
                     DrawCADCircle(
                         Vec(HoverX, HoverY),
@@ -1417,24 +1463,39 @@ UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
             continue;
 
         r1f32 Range = Data->ValueRanges[Axis];
-        f32 Scale = (f32) (Height - 1) / (Range.Max - Range.Min);
-        f32 ValueStep = FLAPGraphTickStep(
-            Range.Max - Range.Min,
-            MAX((u32) ((f32) Height / MAX(Metrics.ValueTick, 1.0f)), (u32) 2)
+        f32 Extent = Range.Max - Range.Min;
+
+        // NOTE(nc): a range with no size, or one that is not finite, has
+        //         : no labels
+        if (!(Extent > 0.0f) || Extent * 0.0f != 0.0f)
+            continue;
+
+        f32 Scale = (f32) (Height - 1) / Extent;
+        u32 MaxTicks = MAX(
+            (u32) ((f32) Height / MAX(Metrics.ValueTick, 1.0f)),
+            (u32) 2
         );
+        f32 ValueStep = FLAPGraphTickStep(Extent, MaxTicks);
         f32 First = CeilF32(Range.Min / ValueStep);
         char* Fmt = (char*) (
-            (ValueStep >= 0.95f) 
-                ? "%.0f" 
-                : (ValueStep >= 0.095f) 
-                    ? "%.1f" 
-                    : (ValueStep >= 0.0095f) 
-                        ? "%.2f" 
+            (ValueStep >= 0.95f)
+                ? "%.0f"
+                : (ValueStep >= 0.095f)
+                    ? "%.1f"
+                    : (ValueStep >= 0.0095f)
+                        ? "%.2f"
                         : "%.3f"
         );
 
-        for (u32 Tick = 0; ; ++Tick) {
-            f32 Value = (First + (f32) Tick) * ValueStep;
+        // NOTE(nc): the step is not below Extent / MaxTicks, so the range
+        //         : has MaxTicks + 1 labels at the most. the count is the
+        //         : limit of the loop, and not the value: an f32 cannot
+        //         : add 1 to a tick index above 2^24, and then the value
+        //         : never gets to the end of the range.
+        for (u32 Tick = 0; Tick <= MaxTicks + 1; ++Tick) {
+            f32 Value = (f32) (
+                ((f64) First + (f64) Tick) * (f64) ValueStep
+            );
 
             if (Value > Range.Max)
                 break;
@@ -2603,7 +2664,7 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
             IsStale = FALSE;
         }
 
-        if (!IsStale) {
+        if (!IsStale && !(IsFitWaiting && IsAtFit)) {
             for (u32 Axis = 0; Axis < 2; ++Axis) {
                 if (!Hold->HasRange[Axis])
                     continue;
@@ -2839,13 +2900,13 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
                 if (!Data->HasRange[Axis])
                     continue;
 
-                r1f32 Range = Data->ValueRanges[Axis];
-                f32 Middle = 0.5f * (Range.Min + Range.Max);
-                f32 Half = 0.5f * (Range.Max - Range.Min) * (f32) Factor;
-
-                // NOTE(nc): a range that f32 cannot hold does not change
-                if (Middle - Half < Middle + Half) {
-                    Hold->ValueRanges[Axis] = Rng(Middle - Half, Middle + Half);
+                if (
+                    FLAPGraphZoomValueRange(
+                        Data->ValueRanges[Axis],
+                        (f32) Factor,
+                        &Hold->ValueRanges[Axis]
+                    )
+                ) {
                     Hold->HasRange[Axis] = TRUE;
                 }
             }
@@ -2862,13 +2923,13 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
                 if (!Data->HasRange[Axis])
                     continue;
 
-                r1f32 Range = Data->ValueRanges[Axis];
-                f32 Middle = 0.5f * (Range.Min + Range.Max);
-                f32 Half = 0.5f * (Range.Max - Range.Min) * Factor;
-
-                // NOTE(nc): a range that f32 cannot hold does not change
-                if (Middle - Half < Middle + Half) {
-                    Hold->ValueRanges[Axis] = Rng(Middle - Half, Middle + Half);
+                if (
+                    FLAPGraphZoomValueRange(
+                        Data->ValueRanges[Axis],
+                        Factor,
+                        &Hold->ValueRanges[Axis]
+                    )
+                ) {
                     Hold->HasRange[Axis] = TRUE;
                 }
             }

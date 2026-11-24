@@ -1553,7 +1553,7 @@ MQTTStrRawFromStr8(Arena* MemPool, Str8 String)
     }
 #endif
 
-internal force_inline char*
+INTERNAL char*
 U64ToCStr(u64 Val, char* BufferEnd)
 {
     char* BufferEndPtr = BufferEnd;

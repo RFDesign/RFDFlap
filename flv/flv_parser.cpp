@@ -1047,15 +1047,19 @@ ParseDisplay(void)
         Arg->IsLabel = (u8) ExprIsStrLit(Arg->Expr);
  
         if (
-            Arg->IsLabel && 
+            Arg->IsLabel &&
             !(
-                Keyword.Kind == TOKEN_KIND_FLAG && 
+                Keyword.Kind == TOKEN_KIND_FLAG &&
                 Count == 2
+            ) &&
+            !(
+                Keyword.Kind == TOKEN_KIND_WRITE &&
+                Count == 1
             )
         ) {
             PARSE_ERROR(
-                ArgTok, 
-                "a string literal is only legal as the second argument of flag()"
+                ArgTok,
+                "a string literal is only legal as the second argument of flag() and the first of write()"
             );
         }
  
@@ -1209,7 +1213,7 @@ ParseStmt(void)
  
         case TOKEN_KIND_GRAPH:
         case TOKEN_KIND_TABLE:
-        case TOKEN_KIND_TEXT:
+        case TOKEN_KIND_WRITE:
         case TOKEN_KIND_FLAG: {
             Result = ParseDisplay();
         } break;

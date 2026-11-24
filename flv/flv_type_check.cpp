@@ -1466,6 +1466,44 @@ StmtNext(AST* Tree, u32 Offset)
 }
 
 INTERNAL void
+CheckWriteFormat(CheckState* State, ASTNodeDisplay* Display)
+{
+    ASTNodeLiteral* Lit = (ASTNodeLiteral*) ExprAt(
+        State->Tree,
+        Display->Arg[0].Expr
+    );
+    Str8 Format = Str(Lit->Val.String.Str, Lit->Val.String.Count);
+    FLVWriteSpec Spec = {};
+    u64 Offset = 0;
+    u32 Count = 0;
+
+    while (FLVWriteSpecNext(Format, &Offset, &Spec)) {
+        if (!Spec.Conversion)
+            continue;
+
+        if (Spec.Conversion == FLV_WRITE_CONVERSION_INVALID) {
+            CHECK_ERROR(
+                State,
+                &Display->Header,
+                "a write format takes the conversions d, i, f, t and m"
+            );
+        } else {
+            ++Count;
+        }
+    }
+
+    if (Count != Display->Header.Count - 1) {
+        CHECK_ERROR(
+            State,
+            &Display->Header,
+            "the write format has %u conversions and write has %u values",
+            Count,
+            Display->Header.Count - 1
+        );
+    }
+}
+
+INTERNAL void
 CheckDisplay(CheckState* State, ASTNodeDisplay* Display, u32* ScopeKinds)
 {
     AST* Tree = State->Tree;
@@ -1475,7 +1513,7 @@ CheckDisplay(CheckState* State, ASTNodeDisplay* Display, u32* ScopeKinds)
         TYPE_INDEX_INVALID_TYPE
     };
 
-    if (Kind != TOKEN_KIND_FLAG) {
+    if (Kind != TOKEN_KIND_FLAG && Kind != TOKEN_KIND_WRITE) {
         u32 Bit = 1U << (Kind - TOKEN_KIND_GRAPH);
 
         if (*ScopeKinds && !(*ScopeKinds & Bit)) {
@@ -1601,7 +1639,29 @@ CheckDisplay(CheckState* State, ASTNodeDisplay* Display, u32* ScopeKinds)
                 }
             } break;
 
-            case TOKEN_KIND_TEXT: {} break;
+            case TOKEN_KIND_WRITE: {
+                if (Index == 0) {
+                    if (Arg->IsLabel) {
+                        CheckWriteFormat(State, Display);
+                    } else {
+                        CHECK_ERROR(
+                            State,
+                            ArgHeader,
+                            "write takes a format string as its first argument"
+                        );
+                    }
+                } else if (IsUntyped(Type) || IsScalar(Type)) {
+                    Adopt(Tree, Arg->Expr, Defaulted(Type));
+                } else if (!IsTimeLike(Type)) {
+                    // NOTE(nc): a duration is a single value too, in
+                    //         : microseconds. %t writes it in seconds.
+                    CHECK_ERROR(
+                        State,
+                        ArgHeader,
+                        "a write argument must be a single value"
+                    );
+                }
+            } break;
         }
     }
 }
