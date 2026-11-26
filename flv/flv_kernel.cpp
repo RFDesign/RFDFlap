@@ -822,6 +822,7 @@ FLV_UNARY_KERNEL(NEG_I64, i64, i64, -A[Index])
 FLV_UNARY_KERNEL(NEG_F64, f64, f64, -A[Index])
 FLV_UNARY_KERNEL(ABS_I64, i64, i64, (A[Index] < 0) ? -A[Index] : A[Index])
 FLV_UNARY_KERNEL(ABS_F64, f64, f64, (A[Index] < 0.0) ? -A[Index] : A[Index])
+FLV_UNARY_KERNEL(SQRT_F64, f64, f64, SqrtF64(A[Index]))
  
 #undef FLV_UNARY_KERNEL
 #undef FLV_OP_MOD_F64
@@ -950,6 +951,85 @@ FLV_KERNEL_FUNC_SIG(FLVKernelMASK_NOT)
     ) {
         Dst[Index] = 0;
     }
+}
+
+INTERNAL b32
+FLVStringHas(u8 const* Text, u64 TextSize, Str8 Needle)
+{
+    b32 Result = !Needle.Size;
+
+    for (
+        u64 Start = 0;
+        !Result && Start + Needle.Size <= TextSize;
+        ++Start
+    ) {
+        Result = !!MemCmp(Text + Start, Needle.Str, Needle.Size);
+    }
+
+    return Result;
+}
+
+// NOTE(nc): the mask of the elements of a string column that match a
+//         : string of the program. the text of an element is its bytes up
+//         : to the first 0, or all of them. the match is exact, so the
+//         : case matters. the column is of the base of the region.
+INTERNAL void
+FLVStringMask(FLVLane* Lane, FLVOp Op, b32 IsWhole, b32 IsNot)
+{
+    ASSERT(FLVGetOperandKind(Op.LHS) == FLV_OPERAND_KIND_SLOT);
+    ASSERT(FLVGetOperandKind(Op.RHS) == FLV_OPERAND_KIND_CONST);
+
+    FLVColumn const* Column = &Lane->Columns[FLVGetOperandIndex(Op.LHS)];
+    Str8 Needle = Lane->Program->Strings[
+        Lane->Program->Consts[FLVGetOperandIndex(Op.RHS)].I64
+    ];
+    u64* Mask = (u64*) FLVTempPtr(Lane, Op.Dst);
+    u64 Size = Column->ElementSize;
+
+    if (
+        Column->IsMissing ||
+        Column->Encoding != FLI_COLUMN_ENCODING_RAW ||
+        Column->Kind < FLI_SCALAR_KIND_CHAR4 ||
+        Column->Kind > FLI_SCALAR_KIND_CHAR64
+    ) {
+        FLVTempSetMissing(Lane, Op.Dst);
+
+        return;
+    }
+
+    u8 const* Element = (u8 const*) Column->Data + Lane->ChunkBase * Size;
+
+    MemSet(Mask, 0, FLV_CHUNK_MASK_WORDS * sizeof(u64));
+
+    for (u64 Index = 0; Index < Lane->ChunkCount; ++Index, Element += Size) {
+        u64 TextSize = 0;
+        b32 IsMatch = FALSE;
+
+        for ( ; TextSize < Size && Element[TextSize]; ++TextSize);
+
+        if (!IsWhole || TextSize == Needle.Size)
+            IsMatch = FLVStringHas(Element, TextSize, Needle);
+
+        Mask[Index >> 6] |= (u64) (IsMatch != IsNot) << (Index & 63);
+    }
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSTR_EQ)
+{
+    FLVStringMask(Lane, Op, TRUE, FALSE);
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSTR_NE)
+{
+    FLVStringMask(Lane, Op, TRUE, TRUE);
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSTR_HAS)
+{
+    FLVStringMask(Lane, Op, FALSE, FALSE);
 }
 
 #define FLV_REDUCE_KERNEL(Name, Type, Field, Body)                        \
@@ -1253,6 +1333,7 @@ FLV_S_UNARY(S_NEG_I64, i64, i64, FLVScalarI64, -A)
 FLV_S_UNARY(S_NEG_F64, f64, f64, FLVScalarF64, -A)
 FLV_S_UNARY(S_ABS_I64, i64, i64, FLVScalarI64, Abs64(A))
 FLV_S_UNARY(S_ABS_F64, f64, f64, FLVScalarF64, AbsF64(A))
+FLV_S_UNARY(S_SQRT_F64, f64, f64, FLVScalarF64, SqrtF64(A))
 FLV_S_BINARY(S_CMP_LT_I64, i64, i64, FLVScalarI64, A < B)
 FLV_S_BINARY(S_CMP_LT_F64, f64, i64, FLVScalarF64, A < B)
 FLV_S_BINARY(S_CMP_LE_I64, i64, i64, FLVScalarI64, A <= B)
@@ -1606,6 +1687,215 @@ FLV_KERNEL_FUNC_SIG(FLVKernelSEL_NOT)
         Dst->V[Dst->Count].Max = Lane->FlightEndUSecs;
         ++Dst->Count;
     }
+}
+
+// NOTE(nc): the ranges of a selection with each gap of Gap or less
+//         : closed, so the ranges at its two sides are one range
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSEL_CLOSE)
+{
+    if (FLVTempIsMissing(Lane, Op.LHS) || FLVTempIsMissing(Lane, Op.RHS)) {
+        FLVTempSetMissing(Lane, Op.Dst);
+
+        return;
+    }
+
+    FLVSelection const* A = FLVSelectionPtr(Lane, Op.LHS);
+    FLVSelection* Dst = FLVSelectionPtr(Lane, Op.Dst);
+    u64 Gap = FLVScalarTimeUSecs(Lane, Op.RHS);
+
+    *Dst = FLVSelectionAlloc(Lane, A->Count);
+
+    for (u64 Index = 0; Index < A->Count; ++Index) {
+        r1u64 Next = A->V[Index];
+
+        if (
+            Dst->Count &&
+            Next.Min <= Dst->V[Dst->Count - 1].Max + Gap
+        ) {
+            Dst->V[Dst->Count - 1].Max = MAX(
+                Dst->V[Dst->Count - 1].Max,
+                Next.Max
+            );
+        } else {
+            Dst->V[Dst->Count] = Next;
+            ++Dst->Count;
+        }
+    }
+}
+
+// NOTE(nc): the ranges of a selection that are as long as Width or
+//         : longer. a range of one sample has no length.
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSEL_LONGER)
+{
+    if (FLVTempIsMissing(Lane, Op.LHS) || FLVTempIsMissing(Lane, Op.RHS)) {
+        FLVTempSetMissing(Lane, Op.Dst);
+
+        return;
+    }
+
+    FLVSelection const* A = FLVSelectionPtr(Lane, Op.LHS);
+    FLVSelection* Dst = FLVSelectionPtr(Lane, Op.Dst);
+    u64 Width = FLVScalarTimeUSecs(Lane, Op.RHS);
+
+    *Dst = FLVSelectionAlloc(Lane, A->Count);
+
+    for (u64 Index = 0; Index < A->Count; ++Index) {
+        Dst->V[Dst->Count] = A->V[Index];
+        Dst->Count += (A->V[Index].Max - A->V[Index].Min >= Width);
+    }
+}
+
+// NOTE(nc): the ranges of A that touch a range of B. two ranges touch
+//         : if they have a time in common, or if one starts at the
+//         : microsecond after the end of the other, as a range and the
+//         : ranges of its ! do. BEFORE keeps a range that starts before
+//         : the range of B and runs up to it or into it. AFTER keeps a
+//         : range that starts in the range of B, or at its end, and runs
+//         : on after it.
+INTERNAL void
+FLVSelectionTouch(FLVLane* Lane, FLVOp Op, FLVTouchKind Kind)
+{
+    if (FLVTempIsMissing(Lane, Op.LHS) || FLVTempIsMissing(Lane, Op.RHS)) {
+        FLVTempSetMissing(Lane, Op.Dst);
+
+        return;
+    }
+
+    FLVSelection const* A = FLVSelectionPtr(Lane, Op.LHS);
+    FLVSelection const* B = FLVSelectionPtr(Lane, Op.RHS);
+    FLVSelection* Dst = FLVSelectionPtr(Lane, Op.Dst);
+    u64 HeadB = 0;
+
+    *Dst = FLVSelectionAlloc(Lane, A->Count);
+
+    for (u64 IndexA = 0; IndexA < A->Count; ++IndexA) {
+        r1u64 RangeA = A->V[IndexA];
+        b32 IsKept = FALSE;
+
+        while (HeadB < B->Count && B->V[HeadB].Max + 1 < RangeA.Min)
+            ++HeadB;
+
+        for (
+            u64 IndexB = HeadB;
+            !IsKept && IndexB < B->Count && B->V[IndexB].Min <= RangeA.Max + 1;
+            ++IndexB
+        ) {
+            r1u64 RangeB = B->V[IndexB];
+
+            switch (Kind) {
+                default: {
+                    IsKept = TRUE;
+                } break;
+
+                case FLV_TOUCH_KIND_BEFORE: {
+                    IsKept = (
+                        RangeA.Min < RangeB.Min &&
+                        RangeA.Max <= RangeB.Max
+                    );
+                } break;
+
+                case FLV_TOUCH_KIND_AFTER: {
+                    IsKept = (
+                        RangeA.Min >= RangeB.Min &&
+                        RangeA.Max > RangeB.Max
+                    );
+                } break;
+            }
+        }
+
+        Dst->V[Dst->Count] = RangeA;
+        Dst->Count += IsKept;
+    }
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSEL_TOUCH)
+{
+    FLVSelectionTouch(Lane, Op, FLV_TOUCH_KIND_ANY);
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSEL_BEFORE)
+{
+    FLVSelectionTouch(Lane, Op, FLV_TOUCH_KIND_BEFORE);
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSEL_AFTER)
+{
+    FLVSelectionTouch(Lane, Op, FLV_TOUCH_KIND_AFTER);
+}
+
+// NOTE(nc): one range of a selection, as a selection. it has no range if
+//         : the selection has no range at that place.
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSEL_PICK)
+{
+    if (FLVTempIsMissing(Lane, Op.LHS) || FLVTempIsMissing(Lane, Op.RHS)) {
+        FLVTempSetMissing(Lane, Op.Dst);
+
+        return;
+    }
+
+    FLVSelection const* A = FLVSelectionPtr(Lane, Op.LHS);
+    FLVSelection* Dst = FLVSelectionPtr(Lane, Op.Dst);
+    u64 Index = (u64) FLVScalarI64(Lane, Op.RHS);
+
+    *Dst = FLVSelectionAlloc(Lane, 1);
+
+    if (Index < A->Count) {
+        Dst->V[0] = A->V[Index];
+        Dst->Count = 1;
+    }
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSEL_COUNT)
+{
+    if (FLVTempIsMissing(Lane, Op.LHS)) {
+        FLVTempSetMissing(Lane, Op.Dst);
+
+        return;
+    }
+
+    FLVSelection const* Sel = FLVSelectionPtr(Lane, Op.LHS);
+    i64* Dst = (i64*) FLVTempPtr(Lane, Op.Dst);
+
+    *Dst = (i64) Sel->Count;
+}
+
+// NOTE(nc): the time of the start of the first range, and of the end of
+//         : the last one. a selection with no range has no such time.
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSEL_START)
+{
+    FLVSelection const* Sel = FLVSelectionPtr(Lane, Op.LHS);
+    i64* Dst = (i64*) FLVTempPtr(Lane, Op.Dst);
+
+    if (FLVTempIsMissing(Lane, Op.LHS) || !Sel->Count) {
+        FLVTempSetMissing(Lane, Op.Dst);
+
+        return;
+    }
+
+    *Dst = (i64) Sel->V[0].Min;
+}
+
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelSEL_END)
+{
+    FLVSelection const* Sel = FLVSelectionPtr(Lane, Op.LHS);
+    i64* Dst = (i64*) FLVTempPtr(Lane, Op.Dst);
+
+    if (FLVTempIsMissing(Lane, Op.LHS) || !Sel->Count) {
+        FLVTempSetMissing(Lane, Op.Dst);
+
+        return;
+    }
+
+    *Dst = (i64) Sel->V[Sel->Count - 1].Max;
 }
 
 INTERNAL
@@ -2009,6 +2299,76 @@ FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_WRITE)
     FLVWritePrint(Lane, Buffer, (u64) Size + 1, Format, Values, ValuesCount);
     Item->Kind = FLV_RENDER_KIND_TEXT;
     Item->Text = Str(Buffer, (u64) Size);
+}
+
+// NOTE(nc): the lines of a write that has ranges. the values of all the
+//         : ranges are in the build of the write, one range after the
+//         : other, so a line takes the values of its range. the lines
+//         : are one string, with a line break between two of them.
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_WRITE_ROWS)
+{
+    u32 EmitIndex = FLVGetOperandIndex(Op.RHS);
+    FLVEmit const* Emit = &Lane->Program->Emits[EmitIndex];
+    FLVRenderItem* Item = &Lane->Items[EmitIndex];
+    FLVEmitBuild* Build = &Lane->EmitBuilds[EmitIndex];
+
+    if (FLVTempIsMissing(Lane, Op.LHS)) {
+        Item->IsMissing = TRUE;
+
+        return;
+    }
+
+    Str8 Format = Lane->Program->Strings[Emit->LabelStringIndex];
+    u64 RowCount = (u64) FLVScalarI64(Lane, Op.LHS);
+    u64 ValuesCount = Build->ByteCount / sizeof(FLVWriteValue);
+    u64 RowValues = RowCount ? ValuesCount / RowCount : 0;
+    FLVWriteValue* Values = ArenaPushArray(
+        Lane->MemPool,
+        FLVWriteValue,
+        ValuesCount
+    );
+    u64 Offset = 0;
+    u64 Size = 0;
+    u64 At = 0;
+
+    for (FLVValueChunk* Chunk = Build->Head; Chunk; Chunk = Chunk->Next) {
+        MemCpy((u8*) Values + Offset, Chunk->V, Chunk->Count);
+        Offset += Chunk->Count;
+    }
+
+    for (u64 Row = 0; Row < RowCount; ++Row) {
+        Size += (u64) FLVWritePrint(
+            Lane,
+            NULL,
+            0,
+            Format,
+            Values + Row * RowValues,
+            RowValues
+        ) + 1;
+    }
+
+    u8* Buffer = ArenaPushArray(Lane->ResultMemPool, u8, Size + 1);
+
+    for (u64 Row = 0; Row < RowCount; ++Row) {
+        At += (u64) FLVWritePrint(
+            Lane,
+            Buffer + At,
+            Size + 1 - At,
+            Format,
+            Values + Row * RowValues,
+            RowValues
+        );
+        Buffer[At++] = '\n';
+    }
+
+    // NOTE(nc): the last line has no line break after it
+    if (At)
+        --At;
+
+    Buffer[At] = 0;
+    Item->Kind = FLV_RENDER_KIND_TEXT;
+    Item->Text = Str(Buffer, At);
 }
 
 INTERNAL

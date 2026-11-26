@@ -103,6 +103,7 @@ enum : u16 {
     X(NEG_F64,             1, F64,        FLV_KERNEL_FLAG_RUN)                                                    \
     X(ABS_I64,             1, I64,        FLV_KERNEL_FLAG_RUN)                                                    \
     X(ABS_F64,             1, F64,        FLV_KERNEL_FLAG_RUN)                                                    \
+    X(SQRT_F64,            1, F64,        FLV_KERNEL_FLAG_RUN)                                                    \
     X(CMP_LT_I64_T,        2, MASK,       FLV_KERNEL_FLAG_RUN)                                                    \
     X(CMP_LT_I64_S,        2, MASK,       FLV_KERNEL_FLAG_RUN)                                                    \
     X(CMP_LT_F64_T,        2, MASK,       FLV_KERNEL_FLAG_RUN)                                                    \
@@ -130,6 +131,9 @@ enum : u16 {
     X(MASK_AND,            2, MASK,       FLV_KERNEL_FLAG_RUN)                                                    \
     X(MASK_OR,             2, MASK,       FLV_KERNEL_FLAG_RUN)                                                    \
     X(MASK_NOT,            1, MASK,       FLV_KERNEL_FLAG_RUN)                                                    \
+    X(STR_EQ,              2, MASK,       FLV_KERNEL_FLAG_RUN)                                                    \
+    X(STR_NE,              2, MASK,       FLV_KERNEL_FLAG_RUN)                                                    \
+    X(STR_HAS,             2, MASK,       FLV_KERNEL_FLAG_RUN)                                                    \
     X(MEAN_I64,            1, SINGLE_F64, FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_REDUCTION)                        \
     X(MEAN_F64,            1, SINGLE_F64, FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_REDUCTION)                        \
     X(STDDEV_I64,          1, SINGLE_F64, FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_REDUCTION)                        \
@@ -163,7 +167,16 @@ enum : u16 {
     X(SEL_AND,             2, SELECTION,  FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(SEL_OR,              2, SELECTION,  FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(SEL_NOT,             1, SELECTION,  FLV_KERNEL_FLAG_SCALAR)                                                 \
+    X(SEL_CLOSE,           2, SELECTION,  FLV_KERNEL_FLAG_SCALAR)                                                 \
+    X(SEL_LONGER,          2, SELECTION,  FLV_KERNEL_FLAG_SCALAR)                                                 \
+    X(SEL_TOUCH,           2, SELECTION,  FLV_KERNEL_FLAG_SCALAR)                                                 \
+    X(SEL_BEFORE,          2, SELECTION,  FLV_KERNEL_FLAG_SCALAR)                                                 \
+    X(SEL_AFTER,           2, SELECTION,  FLV_KERNEL_FLAG_SCALAR)                                                 \
+    X(SEL_PICK,            2, SELECTION,  FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(SEL_DURATION,        1, SINGLE_I64, FLV_KERNEL_FLAG_SCALAR)                                                 \
+    X(SEL_COUNT,           1, SINGLE_I64, FLV_KERNEL_FLAG_SCALAR)                                                 \
+    X(SEL_START,           1, SINGLE_I64, FLV_KERNEL_FLAG_SCALAR)                                                 \
+    X(SEL_END,             1, SINGLE_I64, FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(S_ADD_I64,           2, SINGLE_I64, FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(S_ADD_F64,           2, SINGLE_F64, FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(S_SUB_I64,           2, SINGLE_I64, FLV_KERNEL_FLAG_SCALAR)                                                 \
@@ -178,6 +191,7 @@ enum : u16 {
     X(S_NEG_F64,           1, SINGLE_F64, FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(S_ABS_I64,           1, SINGLE_I64, FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(S_ABS_F64,           1, SINGLE_F64, FLV_KERNEL_FLAG_SCALAR)                                                 \
+    X(S_SQRT_F64,          1, SINGLE_F64, FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(S_CMP_LT_I64,        2, SINGLE_I64, FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(S_CMP_LT_F64,        2, SINGLE_I64, FLV_KERNEL_FLAG_SCALAR)                                                 \
     X(S_CMP_LE_I64,        2, SINGLE_I64, FLV_KERNEL_FLAG_SCALAR)                                                 \
@@ -203,6 +217,7 @@ enum : u16 {
     X(EMIT_WRITE_F64,      1, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
     X(EMIT_WRITE_NONE,     0, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
     X(EMIT_WRITE,          0, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
+    X(EMIT_WRITE_ROWS,     1, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
 
 #define X(Name, Inputs, Dst, Flags) FLV_KERNEL_##Name,
 
@@ -214,6 +229,12 @@ enum : u16 {
 
 #undef X
 
+typedef u8 FLVTouchKind;
+enum : u8 {
+    FLV_TOUCH_KIND_ANY,
+    FLV_TOUCH_KIND_BEFORE,
+    FLV_TOUCH_KIND_AFTER
+};
 
 // @types______________________________________________________________________
 struct FLVKernelInfo {

@@ -86,6 +86,14 @@ Hash(LowerState* State, FLVOperand Op)
             FLVConst const* Const = &State->Consts[FLVGetOperandIndex(Op)];
 
             Result = (u32) (Const->TimeUSecs ^ (Const->TimeUSecs >> 32)) ^ Const->Kind;
+
+            // NOTE(nc): a string is hashed by its text and not by its
+            //         : place in the strings of the program
+            if (Const->Kind == FLV_CONST_KIND_STRING) {
+                u64 TextHash = Hash(State->Strings[Const->I64]);
+
+                Result = (u32) (TextHash ^ (TextHash >> 32)) ^ Const->Kind;
+            }
         } break;
     }
 
@@ -336,6 +344,8 @@ RegionAddMask(LowerState* State, LowerRegion* Region, FLVOperand Mask)
     }
 }
 
+internal LowerValue LowerExpr(LowerState* State, ExprIndex Expr);
+
 internal LowerRegion*
 RegionOpen(LowerState* State, TypeIndex Base)
 {
@@ -368,6 +378,33 @@ RegionOpen(LowerState* State, TypeIndex Base)
             )
         );
     }
+
+    // NOTE(nc): a filter with a string match is of rows and not of
+    //         : times, since messages with one time are common where
+    //         : strings are. on its own message it is a mask of the
+    //         : region, next to its ranges.
+    u32 SavedDepth = State->CtxDepth;
+    b32 SavedHasStringMask = State->HasStringMask;
+
+    for (u32 Depth = 1; Depth <= SavedDepth; ++Depth) {
+        if (!State->FilterIsExact[Depth])
+            continue;
+
+        ExprIndex Cond = State->Filters[Depth - 1];
+
+        if (BaseOf(TypeOf(State, Cond)).V != Base.V)
+            continue;
+
+        State->CtxDepth = Depth - 1;
+
+        LowerValue Mask = LowerExpr(State, Cond);
+
+        if (Mask.Kind == FLV_ELEMENT_KIND_MASK)
+            RegionAddMask(State, Result, Mask.Op);
+    }
+
+    State->CtxDepth = SavedDepth;
+    State->HasStringMask = SavedHasStringMask;
 
     return Result;
 }
@@ -417,6 +454,7 @@ RegionClose(LowerState* State)
 
 internal LowerValue LowerExpr(LowerState* State, ExprIndex Expr);
 internal FLVOperand LowerSelection(LowerState* State, ExprIndex Expr);
+internal b32 IsPlainField(LowerState* State, ExprIndex Expr, OUT u32* Slot);
 
 internal LowerValue
 ValueAlloc(FLVOperand Op, u8 Kind, TypeIndex Type)
@@ -734,7 +772,21 @@ LowerIdent(LowerState* State, ASTNodeExprIdent* Ident)
         return Result;
     }
 
-    if (Ident->Bind.V == FLV_STDLIB_ARMED.V) {
+    if (Ident->Bind.V == FLV_STDLIB_RANGE.V) {
+        if (State->InEach) {
+            Result = ValueAlloc(
+                State->EachSel,
+                FLV_ELEMENT_KIND_SELECTION,
+                Type
+            );
+        } else {
+            LOWER_ERROR(
+                State,
+                &Ident->Header,
+                "range is the range of a row, in a write that has ranges"
+            );
+        }
+    } else if (Ident->Bind.V == FLV_STDLIB_ARMED.V) {
         Result = ValueAlloc(
             EmitOp(
                 State, 
@@ -916,6 +968,87 @@ IsAnd(u8 Op)
     );
 
     return Result;
+}
+
+// NOTE(nc): the mask of a string field against a string literal. the
+//         : field is read from its column by the kernel, so it is the
+//         : field itself, and it is of the base of the region: a string
+//         : is not held on another stream.
+internal LowerValue
+LowerStringMask(
+    LowerState* State,
+    ASTNodeHeader* Header,
+    ExprIndex Field,
+    ExprIndex Literal,
+    u16 Kernel,
+    TypeIndex Type
+) {
+    u32 Slot = U32_MAX;
+
+    if (!State->Region) {
+        LOWER_ERROR(
+            State,
+            Header,
+            "a series value here has no display, reduction or selection to run in"
+        );
+
+        return ValueMissing();
+    }
+
+    if (
+        !ExprIsStrLit(State->Tree, Literal) ||
+        !IsPlainField(State, Field, &Slot)
+    ) {
+        LOWER_ERROR(
+            State,
+            Header,
+            "a string is matched with a string field (MSG.Field) and a string literal"
+        );
+
+        return ValueMissing();
+    }
+
+    FLVSlot const* Source = &State->Slots[Slot];
+
+    if (
+        Source->Message.V != MessageName(State->Region->Base).V ||
+        Source->Instance != MessageInstance(State->Region->Base)
+    ) {
+        LOWER_ERROR(
+            State,
+            Header,
+            "a string field is matched on its own message, and this expression runs on another one"
+        );
+
+        return ValueMissing();
+    }
+
+    ASTNodeLiteral* Lit = (ASTNodeLiteral*) ExprAt(State, Literal);
+    FLVConst Const = {};
+
+    Const.I64 = (i64) StringAdd(
+        State,
+        Str(
+            Lit->Val.String.Str,
+            Lit->Val.String.Count
+        )
+    );
+    Const.Kind = FLV_CONST_KIND_STRING;
+    State->HasStringMask = TRUE;
+
+    return ValueAlloc(
+        EmitOp(
+            State,
+            Kernel,
+            FLVOperandAlloc(
+                FLV_OPERAND_KIND_SLOT,
+                Slot
+            ),
+            ConstAdd(State, Const)
+        ),
+        FLV_ELEMENT_KIND_MASK,
+        Type
+    );
 }
 
 internal LowerValue
@@ -1120,6 +1253,30 @@ LowerBinary(LowerState* State, ASTNodeBinary* Binary)
 
     if (IsKind(Type, TYPE_KIND_SELECTION))
         return LowerBinarySelection(State, Binary, Left, Right);
+
+    // NOTE(nc): a string literal is not a value that is lowered, so the
+    //         : compare with it is lowered here as a whole
+    if (
+        ExprIsStrLit(State->Tree, Left) ||
+        ExprIsStrLit(State->Tree, Right)
+    ) {
+        b32 IsLeft = ExprIsStrLit(State->Tree, Left);
+
+        return LowerStringMask(
+            State,
+            &Binary->Header,
+            IsLeft
+                ? Right
+                : Left,
+            IsLeft
+                ? Left
+                : Right,
+            (Binary->Header.Variant == TOKEN_KIND_EQ_EQ)
+                ? FLV_KERNEL_STR_EQ
+                : FLV_KERNEL_STR_NE,
+            Type
+        );
+    }
 
     LowerValue LHS = LowerExpr(State, Left);
     LowerValue RHS = LowerExpr(State, Right);
@@ -1691,6 +1848,124 @@ LowerCall(LowerState* State, ASTNodeFuncCall* Call, ExprIndex Self)
                 Type
             );
         } break;
+
+        case FLV_STDLIB_ID_SQRT_SERIES:
+        case FLV_STDLIB_ID_SQRT_SCALAR: {
+            LowerValue Value = LowerExpr(State, Head);
+
+            if (
+                !IsChunk(Value) &&
+                Value.Kind != FLV_ELEMENT_KIND_SINGLE_I64 &&
+                Value.Kind != FLV_ELEMENT_KIND_SINGLE_F64
+            ) {
+                return ValueMissing();
+            }
+
+            Value = ToF64(State, Value);
+
+            return ValueAlloc(
+                EmitOp(
+                    State,
+                    (Value.Kind == FLV_ELEMENT_KIND_F64)
+                        ? FLV_KERNEL_SQRT_F64
+                        : FLV_KERNEL_S_SQRT_F64,
+                    Value.Op,
+                    FLV_OPERAND_NONE
+                ),
+                Value.Kind,
+                Type
+            );
+        } break;
+
+        case FLV_STDLIB_ID_CONTAINS: {
+            return LowerStringMask(
+                State,
+                &Call->Header,
+                Call->Arg[1],
+                Call->Arg[0],
+                FLV_KERNEL_STR_HAS,
+                Type
+            );
+        } break;
+
+        case FLV_STDLIB_ID_CLOSE_GAPS:
+        case FLV_STDLIB_ID_DROP_SHORT: {
+            FLVOperand Sel = LowerSelection(State, Head);
+            LowerValue Width = LowerExpr(State, Call->Arg[0]);
+
+            if (
+                Sel == FLV_OPERAND_NONE ||
+                Width.Kind != FLV_ELEMENT_KIND_SINGLE_I64
+            ) {
+                return ValueMissing();
+            }
+
+            return ValueAlloc(
+                EmitOp(
+                    State,
+                    (ID == FLV_STDLIB_ID_CLOSE_GAPS)
+                        ? FLV_KERNEL_SEL_CLOSE
+                        : FLV_KERNEL_SEL_LONGER,
+                    Sel,
+                    Width.Op
+                ),
+                FLV_ELEMENT_KIND_SELECTION,
+                Type
+            );
+        } break;
+
+        case FLV_STDLIB_ID_TOUCHING:
+        case FLV_STDLIB_ID_BEFORE:
+        case FLV_STDLIB_ID_AFTER: {
+            FLVOperand Sel = LowerSelection(State, Head);
+            FLVOperand Other = LowerSelection(State, Call->Arg[0]);
+            u16 Kernel = FLV_KERNEL_SEL_TOUCH;
+
+            if (Sel == FLV_OPERAND_NONE || Other == FLV_OPERAND_NONE)
+                return ValueMissing();
+
+            if (ID == FLV_STDLIB_ID_BEFORE)
+                Kernel = FLV_KERNEL_SEL_BEFORE;
+            else if (ID == FLV_STDLIB_ID_AFTER)
+                Kernel = FLV_KERNEL_SEL_AFTER;
+
+            return ValueAlloc(
+                EmitOp(
+                    State,
+                    Kernel,
+                    Sel,
+                    Other
+                ),
+                FLV_ELEMENT_KIND_SELECTION,
+                Type
+            );
+        } break;
+
+        case FLV_STDLIB_ID_RANGE_COUNT:
+        case FLV_STDLIB_ID_START:
+        case FLV_STDLIB_ID_END: {
+            FLVOperand Sel = LowerSelection(State, Head);
+            u16 Kernel = FLV_KERNEL_SEL_COUNT;
+
+            if (Sel == FLV_OPERAND_NONE)
+                return ValueMissing();
+
+            if (ID == FLV_STDLIB_ID_START)
+                Kernel = FLV_KERNEL_SEL_START;
+            else if (ID == FLV_STDLIB_ID_END)
+                Kernel = FLV_KERNEL_SEL_END;
+
+            return ValueAlloc(
+                EmitOp(
+                    State,
+                    Kernel,
+                    Sel,
+                    FLV_OPERAND_NONE
+                ),
+                FLV_ELEMENT_KIND_SINGLE_I64,
+                Type
+            );
+        } break;
     }
 
     return ValueMissing();
@@ -2091,34 +2366,34 @@ LowerFlag(LowerState* State, ASTNodeDisplay* Display)
 }
 
 internal void
-LowerWrite(LowerState* State, ASTNodeDisplay* Display)
-{
-    ++State->TableGroup;
+EmitOpInto(
+    LowerState* State,
+    u16 Kernel,
+    FLVOperand Dst,
+    FLVOperand LHS,
+    FLVOperand RHS
+) {
+    u8 Kind = FLV_KERNEL_INFO_TABLE[Kernel].DstKind;
+    FLVOperand Temp = EmitOp(State, Kernel, LHS, RHS);
 
-    ASTDisplayArg* Head = &Display->Arg[0];
+    ASSERT(FLV_KERNEL_INFO_TABLE[Kernel].Flags & FLV_KERNEL_FLAG_SCALAR);
 
-    if (!Head->IsLabel || State->Missing) {
-        EmitMissing(State, TOKEN_KIND_WRITE, ArgLabel(State, Head));
-
-        return;
-    }
-
-    ASTNodeLiteral* Lit = (ASTNodeLiteral*) ExprAt(State, Head->Expr);
-    FLVOperand Emit = (FLVOperand) EmitAdd(
-        State,
-        TOKEN_KIND_WRITE,
-        1,
-        FLV_ELEMENT_KIND_NONE,
-        Str(
-            Lit->Val.String.Str,
-            Lit->Val.String.Count
-        )
+    State->Ops[State->OpCount - 1].Dst = Dst;
+    State->TempFree[Kind][State->TempFreeCount[Kind]++] = (u8) (
+        FLVGetOperandIndex(Temp)
     );
+}
 
-    // NOTE(nc): one op for each value, in the order of the format, and
-    //         : then the op that makes the line. a value that is not a
-    //         : single value takes its place as a missing one.
-    for (u32 Index = 1; Index < Display->Header.Count; ++Index) {
+// NOTE(nc): one op for each value, in the order of the format. a value
+//         : that is not a single value takes its place as a missing one.
+internal void
+LowerWriteValues(
+    LowerState* State,
+    ASTNodeDisplay* Display,
+    u32 Head,
+    FLVOperand Emit
+) {
+    for (u32 Index = Head; Index < Display->Header.Count; ++Index) {
         LowerValue Value = LowerExpr(State, Display->Arg[Index].Expr);
         u16 Kernel = FLV_KERNEL_EMIT_WRITE_NONE;
 
@@ -2136,8 +2411,134 @@ LowerWrite(LowerState* State, ASTNodeDisplay* Display)
             Emit
         );
     }
+}
 
-    EmitOp(State, FLV_KERNEL_EMIT_WRITE, FLV_OPERAND_NONE, Emit);
+// NOTE(nc): a write that has ranges is a loop over them. the values are
+//         : lowered one time, with the range of the row as the deepest
+//         : filter, and they run one time for each range. a var with a
+//         : single value that is first used here is not kept after the
+//         : loop, since the loop may not run.
+internal void
+LowerWriteEach(
+    LowerState* State,
+    ASTNodeDisplay* Display,
+    FLVOperand Selection,
+    FLVOperand Emit
+) {
+    if (State->CtxSel[State->CtxDepth] != FLV_OPERAND_NONE) {
+        Selection = EmitOp(
+            State,
+            FLV_KERNEL_SEL_AND,
+            State->CtxSel[State->CtxDepth],
+            Selection
+        );
+    }
+
+    FLVOperand Count = EmitOp(
+        State,
+        FLV_KERNEL_SEL_COUNT,
+        Selection,
+        FLV_OPERAND_NONE
+    );
+    FLVOperand Row = TempAlloc(State, FLV_ELEMENT_KIND_SINGLE_I64);
+
+    EmitOpInto(
+        State,
+        FLV_KERNEL_S_ADD_I64,
+        Row,
+        ConstI64(State, 0),
+        ConstI64(State, 0)
+    );
+
+    u32 HeadIndex = State->RegionCount;
+
+    State->ScalarBarrier = HeadIndex;
+
+    FLVOperand HasRow = EmitOp(
+        State,
+        FLV_KERNEL_S_CMP_LT_I64,
+        Row,
+        Count
+    );
+    u32 JumpIndex = State->RegionCount;
+    u32 SavedVarCount = State->VarCount;
+
+    RegionPush(State, FLV_REGION_KIND_JUMP_IF_FALSE)->Operand = HasRow;
+
+    ASSERT_ALWAYS(State->CtxDepth < FLV_FILTER_DEPTH_MAX);
+
+    State->EachSel = EmitOp(
+        State,
+        FLV_KERNEL_SEL_PICK,
+        Selection,
+        Row
+    );
+    ++State->CtxDepth;
+    State->CtxSel[State->CtxDepth] = State->EachSel;
+    State->FilterIsExact[State->CtxDepth] = FALSE;
+    State->InEach = TRUE;
+    LowerWriteValues(State, Display, 2, Emit);
+    State->InEach = FALSE;
+    --State->CtxDepth;
+    State->VarCount = SavedVarCount;
+    EmitOpInto(
+        State,
+        FLV_KERNEL_S_ADD_I64,
+        Row,
+        Row,
+        ConstI64(State, 1)
+    );
+    RegionPush(State, FLV_REGION_KIND_JUMP)->Target = (u16) HeadIndex;
+    State->Regions[JumpIndex].Target = (u16) State->RegionCount;
+    State->ScalarBarrier = State->RegionCount;
+    EmitOp(State, FLV_KERNEL_EMIT_WRITE_ROWS, Count, Emit);
+}
+
+internal void
+LowerWrite(LowerState* State, ASTNodeDisplay* Display)
+{
+    ++State->TableGroup;
+
+    ASTDisplayArg* Head = &Display->Arg[0];
+    b32 IsEach = (
+        Display->Header.Count > 1 &&
+        !Head->IsLabel &&
+        Display->Arg[1].IsLabel
+    );
+    ASTDisplayArg* Format = &Display->Arg[IsEach ? 1 : 0];
+    FLVOperand Selection = FLV_OPERAND_NONE;
+
+    if (IsEach && !State->Missing)
+        Selection = LowerSelection(State, Head->Expr);
+
+    if (
+        !Format->IsLabel ||
+        State->Missing ||
+        (IsEach && Selection == FLV_OPERAND_NONE)
+    ) {
+        EmitMissing(State, TOKEN_KIND_WRITE, ArgLabel(State, Head));
+
+        return;
+    }
+
+    ASTNodeLiteral* Lit = (ASTNodeLiteral*) ExprAt(State, Format->Expr);
+    FLVOperand Emit = (FLVOperand) EmitAdd(
+        State,
+        TOKEN_KIND_WRITE,
+        1,
+        FLV_ELEMENT_KIND_NONE,
+        Str(
+            Lit->Val.String.Str,
+            Lit->Val.String.Count
+        )
+    );
+
+    if (IsEach) {
+        LowerWriteEach(State, Display, Selection, Emit);
+    } else {
+        LowerWriteValues(State, Display, 1, Emit);
+        EmitOp(State, FLV_KERNEL_EMIT_WRITE, FLV_OPERAND_NONE, Emit);
+    }
 }
 
 internal void
@@ -2170,8 +2571,14 @@ CtxPush(LowerState* State, u32 Depth, ExprIndex Cond)
     FLVOperand Prev = State->CtxSel[Depth - 1];
 
     State->CtxDepth = Depth - 1;
+    State->HasStringMask = FALSE;
 
     FLVOperand Selection = LowerSelection(State, Cond);
+
+    State->FilterIsExact[Depth] = (
+        State->HasStringMask &&
+        IsKind(TypeOf(State, Cond), TYPE_KIND_SERIES)
+    );
 
     if (Selection == FLV_OPERAND_NONE) {
         ++State->Missing;
@@ -2214,6 +2621,7 @@ FilterPop(LowerState* State)
     if (State->CtxSel[Depth] == State->CtxSel[Depth - 1])
         --State->Missing;
 
+    State->FilterIsExact[Depth] = FALSE;
     State->CtxDepth = State->FilterDepth;
 }
 
@@ -2612,6 +3020,14 @@ OperandStr(
 
         case FLV_OPERAND_KIND_CONST: {
             FLVConst const* Const = &Program->Consts[Index];
+
+            if (Const->Kind == FLV_CONST_KIND_STRING) {
+                return ArenaPushStrFmt(
+                    MemPool,
+                    "\"%S\"",
+                    PRINT_STR(Program->Strings[Const->I64])
+                );
+            }
 
             if (Const->Kind == FLV_CONST_KIND_F64) {
                 return ArenaPushStrFmt(

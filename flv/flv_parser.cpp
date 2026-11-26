@@ -1054,12 +1054,12 @@ ParseDisplay(void)
             ) &&
             !(
                 Keyword.Kind == TOKEN_KIND_WRITE &&
-                Count == 1
+                Count <= 2
             )
         ) {
             PARSE_ERROR(
                 ArgTok,
-                "a string literal is only legal as the second argument of flag() and the first of write()"
+                "a string literal is only legal as the second argument of flag() and as the format of write()"
             );
         }
  

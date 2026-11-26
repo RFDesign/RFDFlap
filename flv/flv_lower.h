@@ -35,7 +35,8 @@ typedef u8 FLVConstKind;
 enum : u8 {
     FLV_CONST_KIND_I64,
     FLV_CONST_KIND_F64,
-    FLV_CONST_KIND_TIME
+    FLV_CONST_KIND_TIME,
+    FLV_CONST_KIND_STRING
 };
 
 typedef u8 FLVRegionKind;
@@ -189,6 +190,10 @@ struct LowerState {
     u32              ProgramCount;
     u32              LayoutCount;
     u8               TableGroup;
+    u8               FilterIsExact[FLV_FILTER_DEPTH_MAX + 1];
+    b32              HasStringMask;
+    b32              InEach;
+    FLVOperand       EachSel;
 };
 
 // @runtime____________________________________________________________________

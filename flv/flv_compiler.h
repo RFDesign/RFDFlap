@@ -23,6 +23,7 @@ struct FLVSchema;
 #define FLV_STDLIB_TABLE  (GetTLS()->FLV_COMPILER->StdLib)
 #define FLV_STDLIB_FLIGHT (GetTLS()->FLV_COMPILER->StdLibFlight)
 #define FLV_STDLIB_ARMED  (GetTLS()->FLV_COMPILER->StdLibArmed)
+#define FLV_STDLIB_RANGE  (GetTLS()->FLV_COMPILER->StdLibRange)
 
 #define FLV_LOCK_SCOPE_COMPILER() DEFER(FLVCompilerLock(), FLVCompilerUnlock())
 
@@ -45,6 +46,7 @@ struct FLVCompiler {
     NameIndex    OpNames[256];
     TypeIndex    StdLibFlight;
     BindIndex    StdLibArmed;
+    BindIndex    StdLibRange;
 };
 
 struct FLVSlotName {

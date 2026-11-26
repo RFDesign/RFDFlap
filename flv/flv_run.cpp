@@ -430,6 +430,15 @@ FLVRegionScalar(FLVLane* Lane, FLVRegion const* Region)
     Lane->ChunkBase = 0;
     Lane->ChunkCount = 0;
 
+    // NOTE(nc): a region in a loop runs more than one time, so a temp
+    //         : that was missing the time before is not missing now
+    for (u32 Index = 0; Index < Region->OpCount; ++Index) {
+        FLVOperand Dst = Program->Ops[Region->HeadOp + Index].Dst;
+
+        if (FLVGetOperandKind(Dst) == FLV_OPERAND_KIND_TEMP)
+            Lane->MissingTemps &= ~(1ULL << FLVGetOperandIndex(Dst));
+    }
+
     for (u32 OpIndex = 0; OpIndex < Region->OpCount; ++OpIndex) {
         FLVOp Op = Program->Ops[Region->HeadOp + OpIndex];
 

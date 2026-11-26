@@ -27,6 +27,17 @@ enum : u16 {
     FLV_STDLIB_ID_MODE,
     FLV_STDLIB_ID_EVENT,
     FLV_STDLIB_ID_DURATION,
+    FLV_STDLIB_ID_SQRT_SERIES,
+    FLV_STDLIB_ID_SQRT_SCALAR,
+    FLV_STDLIB_ID_CONTAINS,
+    FLV_STDLIB_ID_CLOSE_GAPS,
+    FLV_STDLIB_ID_DROP_SHORT,
+    FLV_STDLIB_ID_TOUCHING,
+    FLV_STDLIB_ID_BEFORE,
+    FLV_STDLIB_ID_AFTER,
+    FLV_STDLIB_ID_RANGE_COUNT,
+    FLV_STDLIB_ID_START,
+    FLV_STDLIB_ID_END,
     FLV_STDLIB_ID_COUNT
 };
 
@@ -42,6 +53,11 @@ enum : u8 {
     FLV_SIGNATURE_KIND_MODE_TO_SELECTION,                                       // (Mode) -> Selection<flight>
     FLV_SIGNATURE_KIND_I64_TO_SELECTION,                                        // (i64) -> Selection<flight>
     FLV_SIGNATURE_KIND_SELECTION_TO_DURATION,                                   // (Selection<M>) -> Duration
+    FLV_SIGNATURE_KIND_F64_TO_F64,                                              // (f64) -> f64
+    FLV_SIGNATURE_KIND_TEXT_TO_MASK,                                            // (Series<string, M>, string) -> Series<bool, M>
+    FLV_SIGNATURE_KIND_SELECTION_DURATION_TO_SELECTION,                         // (Selection<M>, Duration) -> Selection<M>
+    FLV_SIGNATURE_KIND_SELECTION_SELECTION_TO_SELECTION,                        // (Selection<M>, Selection<T>) -> Selection<M>
+    FLV_SIGNATURE_KIND_SELECTION_TO_I64                                         // (Selection<M>) -> i64
 };
 
 #define FLV_STDLIB_PARAM_T 0

@@ -264,6 +264,20 @@ ExprAt(AST* Tree, ExprIndex Index)
     return (ASTNodeExprAccel*) (Tree->Exprs + Index.V);
 }
 
+// NOTE(nc): a string literal has the void type, so it is found by its
+//         : node and not by its type
+b32
+ExprIsStrLit(AST* Tree, ExprIndex Index)
+{
+    ASTNodeHeader* Header = &ExprAt(Tree, Index)->Header;
+    b32 Result = (
+        Header->Type == AST_LITERAL &&
+        Header->Variant == TOKEN_KIND_STR_LIT
+    );
+
+    return Result;
+}
+
 INTERNAL ExprIndex
 ImplicitChild(AST* Tree, void* Node, u32 NodeSize)
 {
@@ -532,7 +546,12 @@ ResolveCall(
                 : TypeOf(Tree, Expressions[(i32) Index * Step]);
 
             if (TypeAt(P)->Flags & TYPE_FLAG_GENERIC) {
-                IsOkay = TypeUnify(P, A, Bound, TYPE_GENERIC_MAX);
+                // NOTE(nc): a literal with no type yet is a single value,
+                //         : so it is not a series or a selection
+                IsOkay = (
+                    !(IsUntyped(A) && TypeAt(P)->Kind != TYPE_KIND_PARAM) &&
+                    TypeUnify(P, A, Bound, TYPE_GENERIC_MAX)
+                );
                 Score += !IsUntyped(A) + (TypeAt(P)->Kind != TYPE_KIND_PARAM);
             } else if (P.V == A.V) {
                 ++Score;
@@ -869,6 +888,37 @@ CheckBinary(CheckState* State, ASTNodeBinary* Binary)
         }
 
         Node->Type = TypeTime();
+
+        return;
+    }
+
+    // NOTE(nc): a string field with a string literal, by == or !=, is a
+    //         : boolean series of the stream of the field
+    b32 LLit = ExprIsStrLit(Tree, Left);
+    b32 RLit = ExprIsStrLit(Tree, Right);
+
+    if (LLit || RLit) {
+        TypeIndex Field = LLit
+            ? RHS
+            : LHS;
+
+        if (
+            LLit != RLit &&
+            IsStringSeries(Field) &&
+            (Op == TOKEN_KIND_EQ_EQ || Op == TOKEN_KIND_EXCLAIM_EQ)
+        ) {
+            Node->Type = BoolSeries(BaseOf(Field));
+        } else {
+            if ((LLit && RLit) || !IsVoid(Field)) {
+                CHECK_ERROR(
+                    State,
+                    &Node->Header,
+                    "a string literal is compared with a string field, by == or !="
+                );
+            }
+
+            Node->Type.V = BUILTIN_void;
+        }
 
         return;
     }
@@ -1260,8 +1310,29 @@ CheckCall(CheckState* State, ASTNodeFuncCall* Call, ExprIndex Self)
         return;
     }
 
+    if (ArgCount > CHECK_CALL_ARG_MAX) {
+        CHECK_ERROR(
+            State,
+            &Node->Header,
+            "a call takes %u arguments or less",
+            CHECK_CALL_ARG_MAX
+        );
+        Node->Type.V = BUILTIN_void;
+        return;
+    }
+
+    // NOTE(nc): a string literal has no type of its own, so the types of
+    //         : the arguments are given, with the string type for it
+    TypeIndex Types[CHECK_CALL_ARG_MAX] = {};
+
     for (u32 Index = 0; Index < ArgCount; ++Index) {
-        if (IsVoid(TypeOf(Tree, Call->Arg[Index]))) {
+        ExprIndex Arg = Call->Arg[ArgCount - 1 - Index];
+
+        Types[Index] = ExprIsStrLit(Tree, Arg)
+            ? TypeString()
+            : TypeOf(Tree, Arg);
+
+        if (IsVoid(Types[Index])) {
             Node->Type.V = BUILTIN_void;
             return;
         }
@@ -1275,10 +1346,36 @@ CheckCall(CheckState* State, ASTNodeFuncCall* Call, ExprIndex Self)
         Head,
         Call->Arg + (ArgCount - 1),
         -1,
-        NULL,
+        Types,
         ArgCount,
         &Return
     );
+
+    // NOTE(nc): a boolean series is a selection where a function takes
+    //         : one, as it is in a flag and in an if
+    if (Chosen.V == BINDING_INVALID_VALUE) {
+        b32 HasBool = FALSE;
+
+        for (u32 Index = 0; Index < ArgCount; ++Index) {
+            if (IsBoolSeries(Types[Index])) {
+                Types[Index] = TypeSelection(BaseOf(Types[Index]));
+                HasBool = TRUE;
+            }
+        }
+
+        if (HasBool) {
+            Chosen = ResolveCall(
+                Tree,
+                Head,
+                Call->Arg + (ArgCount - 1),
+                -1,
+                Types,
+                ArgCount,
+                &Return
+            );
+        }
+    }
+
     Str8 FuncName = NameStr(((ASTNodeExprIdent*) FuncNode)->Name);
 
     if (Chosen.V == BINDING_INVALID_VALUE) {
@@ -1466,16 +1563,17 @@ StmtNext(AST* Tree, u32 Offset)
 }
 
 INTERNAL void
-CheckWriteFormat(CheckState* State, ASTNodeDisplay* Display)
+CheckWriteFormat(CheckState* State, ASTNodeDisplay* Display, u32 FormatArg)
 {
     ASTNodeLiteral* Lit = (ASTNodeLiteral*) ExprAt(
         State->Tree,
-        Display->Arg[0].Expr
+        Display->Arg[FormatArg].Expr
     );
     Str8 Format = Str(Lit->Val.String.Str, Lit->Val.String.Count);
     FLVWriteSpec Spec = {};
     u64 Offset = 0;
     u32 Count = 0;
+    u32 ValuesCount = Display->Header.Count - 1 - FormatArg;
 
     while (FLVWriteSpecNext(Format, &Offset, &Spec)) {
         if (!Spec.Conversion)
@@ -1492,13 +1590,13 @@ CheckWriteFormat(CheckState* State, ASTNodeDisplay* Display)
         }
     }
 
-    if (Count != Display->Header.Count - 1) {
+    if (Count != ValuesCount) {
         CHECK_ERROR(
             State,
             &Display->Header,
             "the write format has %u conversions and write has %u values",
             Count,
-            Display->Header.Count - 1
+            ValuesCount
         );
     }
 }
@@ -1640,14 +1738,30 @@ CheckDisplay(CheckState* State, ASTNodeDisplay* Display, u32* ScopeKinds)
             } break;
 
             case TOKEN_KIND_WRITE: {
-                if (Index == 0) {
+                // NOTE(nc): a write that has ranges has them before its
+                //         : format, and it writes a line for each range
+                u32 FormatArg = (
+                    ArgCount > 1 &&
+                    !Display->Arg[0].IsLabel &&
+                    Display->Arg[1].IsLabel
+                );
+
+                if (Index < FormatArg) {
+                    if (!IsBoolSeries(Type) && !IsSelection(Type)) {
+                        CHECK_ERROR(
+                            State,
+                            ArgHeader,
+                            "the ranges of a write must be a selection or a boolean series"
+                        );
+                    }
+                } else if (Index == FormatArg) {
                     if (Arg->IsLabel) {
-                        CheckWriteFormat(State, Display);
+                        CheckWriteFormat(State, Display, FormatArg);
                     } else {
                         CHECK_ERROR(
                             State,
                             ArgHeader,
-                            "write takes a format string as its first argument"
+                            "write takes a format string, alone or after its ranges"
                         );
                     }
                 } else if (IsUntyped(Type) || IsScalar(Type)) {
