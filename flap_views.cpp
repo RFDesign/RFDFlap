@@ -386,6 +386,9 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
 
         // NOTE(nc): the lines of the write directives, above what the
         //         : analysis shows. a write that did not run has no line.
+        //         : a write with ranges has a line for each range, with a
+        //         : line break between two of them. a label draws one
+        //         : line, so each line is a label of its own.
         for (
             u32 Index = 0;
             Items && Index < Program->EmitCount;
@@ -398,19 +401,30 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                 continue;
             }
 
-            // NOTE(nc): no room for more lines
-            if (Length(Rect).Y < 2.0f * RowHeight)
-                break;
+            Str8 Text = Items[Index].Text;
+            u32 Line = 0;
 
-            UIWidthFill() {
-                UILabel(
-                    "%S###write_%u",
-                    PRINT_STR(Items[Index].Text),
-                    Index
-                );
+            for (u64 Start = 0; Start <= Text.Size; ++Line) {
+                u64 End = Start;
+
+                for ( ; End < Text.Size && Text.Str[End] != '\n'; ++End);
+
+                // NOTE(nc): no room for more lines
+                if (Length(Rect).Y < 2.0f * RowHeight)
+                    break;
+
+                UIWidthFill() {
+                    UILabel(
+                        "%S###write_%u_%u",
+                        PRINT_STR(StrSub(Text, Rng(Start, End))),
+                        Index,
+                        Line
+                    );
+                }
+
+                Rect.Y0 += RowHeight;
+                Start = End + 1;
             }
-
-            Rect.Y0 += RowHeight;
         }
 
         if (!Items) {

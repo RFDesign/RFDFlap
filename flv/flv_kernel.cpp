@@ -1032,7 +1032,14 @@ FLV_KERNEL_FUNC_SIG(FLVKernelSTR_HAS)
     FLVStringMask(Lane, Op, FALSE, FALSE);
 }
 
-#define FLV_REDUCE_KERNEL(Name, Type, Field, Body)                        \
+#define FLV_VALID_I64(X) ((X) != FLV_I64_HOLE)
+#define FLV_VALID_F64(X) ((X) == (X))
+#define FLV_FINITE_F64(X) (((X) - (X)) == 0.0)
+
+// NOTE(nc): a sample with no value, a hole or a NaN, is not in a
+//         : reduction, as a sample that the filter takes out is not. the
+//         : first sample of the reduction is the first that is in it.
+#define FLV_REDUCE_KERNEL(Name, Type, Field, Valid, Body)                 \
     INTERNAL                                                              \
     FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                                  \
     {                                                                     \
@@ -1049,26 +1056,32 @@ FLV_KERNEL_FUNC_SIG(FLVKernelSTR_HAS)
         u64 Head = FLVMaskHead(Mask, Lane->ChunkCount);                   \
         u64 Tail = FLVMaskTail(Mask, Lane->ChunkCount);                   \
                                                                           \
-        if (Head >= Tail)                                                 \
-            return;                                                       \
-                                                                          \
         if (!R->Count) {                                                  \
-            R->Head.Field = A[Head];                                      \
-            R->Minimum.Field = A[Head];                                   \
-            R->Maximum.Field = A[Head];                                   \
-            R->Shift = (f64) A[Head];                                     \
-        }                                                                 \
+            for (                                                         \
+                ;                                                         \
+                Head < Tail &&                                            \
+                !(FLVMaskBit(Mask, Head) && Valid(A[Head]));              \
+                ++Head                                                    \
+            );                                                            \
                                                                           \
-        R->Tail.Field = A[Tail - 1];                                      \
+            if (Head < Tail) {                                            \
+                R->Head.Field = A[Head];                                  \
+                R->Minimum.Field = A[Head];                               \
+                R->Maximum.Field = A[Head];                               \
+                R->Shift = (f64) A[Head];                                 \
+            }                                                             \
+        }                                                                 \
                                                                           \
         for (u64 Index = Head; Index < Tail; ++Index) {                   \
             Type X = A[Index];                                            \
-            u64  Bit = FLVMaskBit(Mask, Index);                           \
+            u64  Bit = FLVMaskBit(Mask, Index) & (u64) Valid(X);          \
                                                                           \
             Body;                                                         \
+            R->Tail.Field = Bit ? X : R->Tail.Field;                      \
             R->Count += Bit;                                              \
         }                                                                 \
     }
+
  
 #define FLV_BODY_NONE
 
@@ -1082,23 +1095,24 @@ FLV_KERNEL_FUNC_SIG(FLVKernelSTR_HAS)
 
 #define FLV_BODY_MIN(Field) R->Minimum.Field = (Bit && X < R->Minimum.Field) ? X : R->Minimum.Field
 #define FLV_BODY_MAX(Field) R->Maximum.Field = (Bit && X > R->Maximum.Field) ? X : R->Maximum.Field
- 
-FLV_REDUCE_KERNEL(MEAN_I64,     i64, I64, FLV_BODY_MEAN)
-FLV_REDUCE_KERNEL(MEAN_F64,     f64, F64, FLV_BODY_MEAN)
-FLV_REDUCE_KERNEL(STDDEV_I64,   i64, I64, FLV_BODY_STDDEV)
-FLV_REDUCE_KERNEL(STDDEV_F64,   f64, F64, FLV_BODY_STDDEV)
-FLV_REDUCE_KERNEL(MIN_I64,      i64, I64, FLV_BODY_MIN(I64))
-FLV_REDUCE_KERNEL(MIN_F64,      f64, F64, FLV_BODY_MIN(F64))
-FLV_REDUCE_KERNEL(MAX_I64,      i64, I64, FLV_BODY_MAX(I64))
-FLV_REDUCE_KERNEL(MAX_F64,      f64, F64, FLV_BODY_MAX(F64))
-FLV_REDUCE_KERNEL(SUM_I64,      i64, I64, FLV_BODY_SUM(I64, 0))
-FLV_REDUCE_KERNEL(SUM_F64,      f64, F64, FLV_BODY_SUM(F64, 0.0))
-FLV_REDUCE_KERNEL(FIRST_I64,    i64, I64, FLV_BODY_NONE)
-FLV_REDUCE_KERNEL(FIRST_F64,    f64, F64, FLV_BODY_NONE)
-FLV_REDUCE_KERNEL(LAST_I64,     i64, I64, FLV_BODY_NONE)
-FLV_REDUCE_KERNEL(LAST_F64,     f64, F64, FLV_BODY_NONE)
-FLV_REDUCE_KERNEL(REDUCE_COUNT, i64, I64, FLV_BODY_NONE)
- 
+
+FLV_REDUCE_KERNEL(MEAN_I64,     i64, I64, FLV_VALID_I64, FLV_BODY_MEAN)
+FLV_REDUCE_KERNEL(MEAN_F64,     f64, F64, FLV_VALID_F64, FLV_BODY_MEAN)
+FLV_REDUCE_KERNEL(STDDEV_I64,   i64, I64, FLV_VALID_I64, FLV_BODY_STDDEV)
+FLV_REDUCE_KERNEL(STDDEV_F64,   f64, F64, FLV_VALID_F64, FLV_BODY_STDDEV)
+FLV_REDUCE_KERNEL(MIN_I64,      i64, I64, FLV_VALID_I64, FLV_BODY_MIN(I64))
+FLV_REDUCE_KERNEL(MIN_F64,      f64, F64, FLV_VALID_F64, FLV_BODY_MIN(F64))
+FLV_REDUCE_KERNEL(MAX_I64,      i64, I64, FLV_VALID_I64, FLV_BODY_MAX(I64))
+FLV_REDUCE_KERNEL(MAX_F64,      f64, F64, FLV_VALID_F64, FLV_BODY_MAX(F64))
+FLV_REDUCE_KERNEL(SUM_I64,      i64, I64, FLV_VALID_I64, FLV_BODY_SUM(I64, 0))
+FLV_REDUCE_KERNEL(SUM_F64,      f64, F64, FLV_VALID_F64, FLV_BODY_SUM(F64, 0.0))
+FLV_REDUCE_KERNEL(FIRST_I64,    i64, I64, FLV_VALID_I64, FLV_BODY_NONE)
+FLV_REDUCE_KERNEL(FIRST_F64,    f64, F64, FLV_VALID_F64, FLV_BODY_NONE)
+FLV_REDUCE_KERNEL(LAST_I64,     i64, I64, FLV_VALID_I64, FLV_BODY_NONE)
+FLV_REDUCE_KERNEL(LAST_F64,     f64, F64, FLV_VALID_F64, FLV_BODY_NONE)
+FLV_REDUCE_KERNEL(REDUCE_COUNT, i64, I64, FLV_VALID_I64, FLV_BODY_NONE)
+FLV_REDUCE_KERNEL(REDUCE_COUNT_F64, f64, F64, FLV_VALID_F64, FLV_BODY_NONE)
+
 #undef FLV_BODY_MAX
 #undef FLV_BODY_MIN
 #undef FLV_BODY_STDDEV
@@ -1123,7 +1137,11 @@ FLV_REDUCE_KERNEL(REDUCE_COUNT, i64, I64, FLV_BODY_NONE)
     u64 const*  T = Lane->ChunkTime;                                      \
     u64 Count = Lane->ChunkCount
  
-#define FLV_DIFF_KERNEL(Name, Type, Field, Hole)                          \
+// NOTE(nc): a sample that the filter takes out, or that has no value, is
+//         : skipped, and the next sample is taken from the last one that
+//         : was in. a gap does not reset the prev: an instance is a mask
+//         : over samples that alternate, so a reset would lose them all.
+#define FLV_DIFF_KERNEL(Name, Type, Field, Hole, Valid)                   \
     INTERNAL                                                              \
     FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                                  \
     {                                                                     \
@@ -1133,13 +1151,15 @@ FLV_REDUCE_KERNEL(REDUCE_COUNT, i64, I64, FLV_BODY_NONE)
         b32   HasPrev = W->HasPrev;                                       \
                                                                           \
         for (u64 Index = 0; Index < Count; ++Index) {                     \
-            if (!FLVMaskBit(Mask, Index)) {                               \
+            Type X = A[Index];                                            \
+                                                                          \
+            if (!FLVMaskBit(Mask, Index) || !Valid(X)) {                  \
                 Dst[Index] = Hole;                                        \
                 continue;                                                 \
             }                                                             \
                                                                           \
-            Dst[Index] = HasPrev ? A[Index] - Prev : Hole;                \
-            Prev = A[Index];                                              \
+            Dst[Index] = HasPrev ? X - Prev : Hole;                       \
+            Prev = X;                                                     \
             HasPrev = TRUE;                                               \
         }                                                                 \
                                                                           \
@@ -1147,12 +1167,14 @@ FLV_REDUCE_KERNEL(REDUCE_COUNT, i64, I64, FLV_BODY_NONE)
         W->HasPrev = HasPrev;                                             \
     }
  
-FLV_DIFF_KERNEL(DIFF_I64, i64, I64, FLV_I64_HOLE)
-FLV_DIFF_KERNEL(DIFF_F64, f64, F64, NC_NAN)
+FLV_DIFF_KERNEL(DIFF_I64, i64, I64, FLV_I64_HOLE, FLV_VALID_I64)
+FLV_DIFF_KERNEL(DIFF_F64, f64, F64, NC_NAN, FLV_VALID_F64)
  
 #undef FLV_DIFF_KERNEL
- 
-#define FLV_RATE_KERNEL(Name, Type, Field)                                \
+
+// NOTE(nc): two samples at one time have no rate between them. the later
+//         : one is the prev, so the next rate is from the newest value.
+#define FLV_RATE_KERNEL(Name, Type, Field, Valid)                         \
     INTERNAL                                                              \
     FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                                  \
     {                                                                     \
@@ -1163,16 +1185,19 @@ FLV_DIFF_KERNEL(DIFF_F64, f64, F64, NC_NAN)
         b32   HasPrev = W->HasPrev;                                       \
                                                                           \
         for (u64 Index = 0; Index < Count; ++Index) {                     \
-            if (!FLVMaskBit(Mask, Index)) {                               \
+            Type X = A[Index];                                            \
+                                                                          \
+            if (!FLVMaskBit(Mask, Index) || !Valid(X)) {                  \
                 Dst[Index] = NC_NAN;                                      \
                 continue;                                                 \
             }                                                             \
                                                                           \
-            Dst[Index] = HasPrev                                          \
-                ? (f64) (A[Index] - Prev) * SECONDS(1.0) /                \
-                  (f64) (T[Index] - PrevTime)                             \
+            f64 Step = (f64) (i64) (T[Index] - PrevTime);                 \
+                                                                          \
+            Dst[Index] = (HasPrev && Step > 0.0)                          \
+                ? ((f64) X - (f64) Prev) * SECONDS(1.0) / Step            \
                 : NC_NAN;                                                 \
-            Prev = A[Index];                                              \
+            Prev = X;                                                     \
             PrevTime = T[Index];                                          \
             HasPrev = TRUE;                                               \
         }                                                                 \
@@ -1182,9 +1207,9 @@ FLV_DIFF_KERNEL(DIFF_F64, f64, F64, NC_NAN)
         W->HasPrev = HasPrev;                                             \
     }
  
-FLV_RATE_KERNEL(RATE_I64, i64, I64)
-FLV_RATE_KERNEL(RATE_F64, f64, F64)
- 
+FLV_RATE_KERNEL(RATE_I64, i64, I64, FLV_VALID_I64)
+FLV_RATE_KERNEL(RATE_F64, f64, F64, FLV_VALID_F64)
+
 #undef FLV_RATE_KERNEL
  
 #define FLV_EVICT_FRONT(Body)                                                \
@@ -1194,7 +1219,12 @@ FLV_RATE_KERNEL(RATE_F64, f64, F64)
         --W->Count;                                                          \
     }
  
-#define FLV_ROLLING_MEAN_KERNEL(Name, Type, Field, Hole)                    \
+// NOTE(nc): a sample with no value is skipped, as in a diff and a rate:
+//         : it is not put in the window and it has no value out. the
+//         : first sample of a rate is one, so a window that took it in
+//         : would have no value after it. the sum of a mean is a
+//         : running one, so an infinity is kept out of it as well.
+#define FLV_ROLLING_MEAN_KERNEL(Name, Type, Field, Hole, Valid)             \
     INTERNAL                                                                \
     FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                                    \
     {                                                                       \
@@ -1203,7 +1233,9 @@ FLV_RATE_KERNEL(RATE_F64, f64, F64)
         u64  Width = FLVScalarTimeUSecs(Lane, Op.RHS);                      \
                                                                             \
         for (u64 Index = 0; Index < Count; ++Index) {                       \
-            if (!FLVMaskBit(Mask, Index)) {                                 \
+            Type X = A[Index];                                              \
+                                                                            \
+            if (!FLVMaskBit(Mask, Index) || !Valid(X)) {                    \
                 Dst[Index] = Hole;                                          \
                 continue;                                                   \
             }                                                               \
@@ -1212,17 +1244,20 @@ FLV_RATE_KERNEL(RATE_F64, f64, F64)
                 W->Summation.Field -= W->Values[FLV_RING(W, W->Head)].Field \
             );                                                              \
                                                                             \
+            if (!W->Count)                                                  \
+                W->Summation.Field = 0;                                     \
+                                                                            \
             u64 Back = FLV_RING(W, W->Head + W->Count);                     \
                                                                             \
             W->Times[Back] = T[Index];                                      \
-            W->Values[Back].Field = A[Index];                               \
-            W->Summation.Field += A[Index];                                 \
+            W->Values[Back].Field = X;                                      \
+            W->Summation.Field += X;                                        \
             ++W->Count;                                                     \
             Dst[Index] = W->Summation.Field / (Type) W->Count;              \
         }                                                                   \
     }
- 
-#define FLV_ROLLING_EXTREME_KERNEL(Name, Type, Field, Hole, PopSym)       \
+
+#define FLV_ROLLING_EXTREME_KERNEL(Name, Type, Field, Hole, Valid, PopSym) \
     INTERNAL                                                              \
     FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                                  \
     {                                                                     \
@@ -1231,7 +1266,9 @@ FLV_RATE_KERNEL(RATE_F64, f64, F64)
         u64  Width = FLVScalarTimeUSecs(Lane, Op.RHS);                    \
                                                                           \
         for (u64 Index = 0; Index < Count; ++Index) {                     \
-            if (!FLVMaskBit(Mask, Index)) {                               \
+            Type X = A[Index];                                            \
+                                                                          \
+            if (!FLVMaskBit(Mask, Index) || !Valid(X)) {                  \
                 Dst[Index] = Hole;                                        \
                 continue;                                                 \
             }                                                             \
@@ -1241,7 +1278,7 @@ FLV_RATE_KERNEL(RATE_F64, f64, F64)
             while (                                                       \
                 W->Count &&                                               \
                 W->Values[FLV_RING(W, W->Head + W->Count - 1)].Field      \
-                    PopSym A[Index]                                       \
+                    PopSym X                                              \
             ) {                                                           \
                 --W->Count;                                               \
             }                                                             \
@@ -1249,24 +1286,27 @@ FLV_RATE_KERNEL(RATE_F64, f64, F64)
             u64 Back = FLV_RING(W, W->Head + W->Count);                   \
                                                                           \
             W->Times[Back] = T[Index];                                    \
-            W->Values[Back].Field = A[Index];                             \
+            W->Values[Back].Field = X;                                    \
             ++W->Count;                                                   \
             Dst[Index] = W->Values[FLV_RING(W, W->Head)].Field;           \
         }                                                                 \
     }
- 
-FLV_ROLLING_MEAN_KERNEL(ROLLING_MEAN_I64, i64, I64, FLV_I64_HOLE)
-FLV_ROLLING_MEAN_KERNEL(ROLLING_MEAN_F64, f64, F64, NC_NAN)
-FLV_ROLLING_EXTREME_KERNEL(ROLLING_MIN_I64, i64, I64, FLV_I64_HOLE, >=)
-FLV_ROLLING_EXTREME_KERNEL(ROLLING_MIN_F64, f64, F64, NC_NAN, >=)
-FLV_ROLLING_EXTREME_KERNEL(ROLLING_MAX_I64, i64, I64, FLV_I64_HOLE, <=)
-FLV_ROLLING_EXTREME_KERNEL(ROLLING_MAX_F64, f64, F64, NC_NAN, <=)
- 
+
+FLV_ROLLING_MEAN_KERNEL(ROLLING_MEAN_I64, i64, I64, FLV_I64_HOLE, FLV_VALID_I64)
+FLV_ROLLING_MEAN_KERNEL(ROLLING_MEAN_F64, f64, F64, NC_NAN, FLV_FINITE_F64)
+FLV_ROLLING_EXTREME_KERNEL(ROLLING_MIN_I64, i64, I64, FLV_I64_HOLE, FLV_VALID_I64, >=)
+FLV_ROLLING_EXTREME_KERNEL(ROLLING_MIN_F64, f64, F64, NC_NAN, FLV_VALID_F64, >=)
+FLV_ROLLING_EXTREME_KERNEL(ROLLING_MAX_I64, i64, I64, FLV_I64_HOLE, FLV_VALID_I64, <=)
+FLV_ROLLING_EXTREME_KERNEL(ROLLING_MAX_F64, f64, F64, NC_NAN, FLV_VALID_F64, <=)
+
 #undef FLV_ROLLING_EXTREME_KERNEL
 #undef FLV_ROLLING_MEAN_KERNEL
 #undef FLV_EVICT_FRONT
 #undef FLV_WINDOW_HEAD
 #undef FLV_RING
+#undef FLV_FINITE_F64
+#undef FLV_VALID_F64
+#undef FLV_VALID_I64
 
 #define FLV_S_HEAD                                                              \
     if (FLVTempIsMissing(Lane, Op.LHS) || FLVTempIsMissing(Lane, Op.RHS)) {     \
@@ -2732,7 +2772,8 @@ FLVKernelsRegionEnd(FLVLane* Lane, FLVRegion const* Region)
                 *Dst = R->Tail;
             } break;
  
-            case FLV_KERNEL_REDUCE_COUNT: {
+            case FLV_KERNEL_REDUCE_COUNT:
+            case FLV_KERNEL_REDUCE_COUNT_F64: {
                 Dst->I64 = (i64) R->Count;
             } break;
         }

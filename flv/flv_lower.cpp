@@ -1586,6 +1586,12 @@ ReductionKernel(u16 ID, b32 IsF64)
         case FLV_STDLIB_ID_LENGTH: { 
             Result = FLV_KERNEL_REDUCE_COUNT; 
         } break;
+
+        case FLV_STDLIB_ID_COUNT: { 
+            Result = IsF64 
+                ? FLV_KERNEL_REDUCE_COUNT_F64 
+                : FLV_KERNEL_REDUCE_COUNT; 
+        } break;
     }
 
     return Result;

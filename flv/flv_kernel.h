@@ -149,6 +149,7 @@ enum : u16 {
     X(LAST_I64,            1, SINGLE_I64, FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_REDUCTION)                        \
     X(LAST_F64,            1, SINGLE_F64, FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_REDUCTION)                        \
     X(REDUCE_COUNT,        1, SINGLE_I64, FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_REDUCTION)                        \
+    X(REDUCE_COUNT_F64,    1, SINGLE_I64, FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_REDUCTION)                        \
     X(DIFF_I64,            1, I64,        FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_WINDOW)                           \
     X(DIFF_F64,            1, F64,        FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_WINDOW)                           \
     X(RATE_I64,            1, F64,        FLV_KERNEL_FLAG_RUN | FLV_KERNEL_FLAG_WINDOW)                           \

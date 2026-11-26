@@ -19152,7 +19152,7 @@ AppWindowFrame(void)
                     if (SelectedTabLoadingT > 0.01f) {
                         UIParent(LoadingOverlayContainer) {
                             UILoadingOverlay(
-                                LoadingOverlayContainer->Rect,
+                                ContentRect,
                                 SelectedTabLoadingT,
                                 SelectedTabViewState->LoadingProgressV,
                                 SelectedTabViewState->LoadingProgressVTarget
