@@ -212,6 +212,17 @@ SchemaBuildAddFlight(
             TypeIndex Elem = ElemFromScalarKind(Field->StoredKind);
             u32 Found = Message->FieldCount;
 
+            // NOTE(nc): a whole number with a multiplier is not a whole
+            //         : number when it is loaded, so its values are f64.
+            //         : the time of a message stays as it is stored.
+            if (
+                Elem.V == BUILTIN_i64 &&
+                Field->Multiplier != 1.0 &&
+                Field->ColumnIndex != MessageType->TimeColumn
+            ) {
+                Elem.V = BUILTIN_f64;
+            }
+
             for (
                 u32 Existing = 0; 
                 Existing < Message->FieldCount; 

@@ -5178,6 +5178,9 @@ FLIBake(Arena* MemPool, FLIBakeParams* Params)
             Dst->RecordCount = Src->RecordCount;
             Dst->SkippedRecordCount = Src->SkippedRecordCount;
             Dst->StartUnixUSecs = Src->StartUnixUSecs;
+            Dst->OriginKind = Src->OriginKind;
+            Dst->OriginLat = Src->OriginLat;
+            Dst->OriginLng = Src->OriginLng;
             FLI_BAKE_SHARED->BakedFileInfo.FileInfo = Dst;
             FLI_BAKE_SHARED->BakedFileInfo.FileInfoCount = 1;
         }
