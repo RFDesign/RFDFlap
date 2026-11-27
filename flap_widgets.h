@@ -18,6 +18,9 @@
 #define FLAP_GRAPH_SPAN_MAX_USECS (1ULL << 40)
 #define FLAP_GRAPH_MINIMAP_WIDTH  512
 #define FLAP_GRAPH_MINIMAP_HEIGHT 32
+#define FLAP_GRAPH_MODE_COLOURS   8
+#define FLAP_GRAPH_FLAGS_MAX      64
+#define FLAP_GRAPH_FLAG_ALPHA     0.5f
 #define FLAP_GRAPH_MINIMAP_LANE   3
 #define FLAP_GRAPH_MODE_COLOURS   8
 #define FLAP_GPS_EPOCH_UNIX_SECS  315964800ULL
@@ -38,9 +41,8 @@ typedef u32 FLAPGraphSettingKind;
 enum : u32 {
     FLAP_GRAPH_SETTING_KIND_LOCK_Y,
     FLAP_GRAPH_SETTING_KIND_SHOW_MINIMAP,
-    FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS_ON_GRAPH,
+    FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS,
     FLAP_GRAPH_SETTING_KIND_SHOW_MODES_ON_GRAPH,
-    FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS_ON_MINIMAP,
     FLAP_GRAPH_SETTING_KIND_SHOW_MODES_ON_MINIMAP,
     FLAP_GRAPH_SETTING_KIND_TIME_FROM_CURSOR,
     FLAP_GRAPH_SETTING_KIND_COUNT
@@ -144,17 +146,14 @@ struct FLAPGraphMinimapDrag {
     u32                      __Padding;
 };
 
-// NOTE(nc): the head of the key of a minimap texture. the colours follow
-//         : it: the curves, then the flags, then the modes. a count of
-//         : zero is a layer that is off. the source of the view is last.
 struct FLAPGraphMinimapKey {
     u64    UnitHash;
     FLIKey Flight;
     r1u64  TimeRangeUSecs;
     u32    AnalysisIndex;
     u32    ColoursCount;
-    u32    FlagColoursCount;
     u32    ModeColoursCount;
+    u32    __Padding;
 };
 
 struct FLAPGraphMinimapDrawData {
@@ -186,6 +185,8 @@ struct FLAPGraphState {
     b32                  IsCaptureRequested;
     b32                  IsMenuOpened;
     u32                  FitGeneration;
+    b32                  IsTabCapture;
+    u32                  __Padding;
 };
 
 struct FLAPGraphParams {
@@ -273,6 +274,7 @@ u32 FLAPGraphMinimapPixel(v4f32 Colour);
 Str8 FLAPGraphModeName(Arena* MemPool, FLVModeName const* Names, u32 Count, u32 Number);
 void FLAPGraph(FLAPGraphParams* Params, r2f32 Rect);
 b32 FLAPTableCtxFromParams(Arena* MemPool, FLAPTableParams* Params, OUT FLAPTableCtx* Ctx);
+u64* FLAPGraphFlagMasks(Arena* MemPool, FLAPGraphDrawData const* Data);
 
 INTERNAL UI_BOX_CUSTOM_DRAW(FLAPFlaggedRowDraw);
 INTERNAL UI_BOX_CUSTOM_DRAW(FLAPGraphDraw);

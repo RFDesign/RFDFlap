@@ -625,6 +625,181 @@ CLIOpenFlights(void)
     }
 }
 
+// NOTE(nc): a name that one of the names before it is the same as has its
+//         : count after it, so no two files of an FLV have one name. the
+//         : case is not looked at, since a file system may not. the last
+//         : name is done first, so the names before it are as they were
+//         : made. a name with no size is not a file.
+INTERNAL void
+CLINamesMakeUnique(Arena* MemPool, Str8* Names, u32 Count)
+{
+    for (u32 Index = Count; Index--; ) {
+        u32 Same = 1;
+
+        if (!Names[Index].Size)
+            continue;
+
+        for (u32 Prev = 0; Prev < Index; ++Prev) {
+            Same += !!StrMatch(
+                Names[Prev],
+                Names[Index],
+                STR_MATCH_ALL_CASES
+            );
+        }
+
+        if (Same > 1) {
+            Names[Index] = ArenaPushStrFmt(
+                MemPool,
+                "%S_%u",
+                PRINT_STR(Names[Index]),
+                Same
+            );
+        }
+    }
+}
+
+// NOTE(nc): the emits of one directive are next to each other, with one
+//         : kind and one group. the result is the index after the last.
+INTERNAL u32
+CLIDirectiveTail(FLVProgram const* P, u32 Head)
+{
+    u32 Result = Head + 1;
+
+    while (
+        Result < P->EmitCount &&
+        P->Emits[Result].DisplayKind == P->Emits[Head].DisplayKind &&
+        P->Emits[Result].Group == P->Emits[Head].Group
+    ) {
+        ++Result;
+    }
+
+    return Result;
+}
+
+INTERNAL Str8
+CLIFileNameFromLabel(Arena* MemPool, Str8 Label)
+{
+    Str8 Result = ArenaPushStrCpy(
+        MemPool,
+        StrPrefix(Label, MIN(Label.Size, 48))
+    );
+
+    for (u64 Index = 0; Index < Result.Size; ++Index) {
+        u8 Byte = Result.Str[Index];
+
+        if (!IsAlpha(Byte) && !IsDigit(Byte) && Byte != '_' && Byte != '-')
+            Result.Str[Index] = '_';
+    }
+
+    return Result;
+}
+
+// NOTE(nc): the names of the files of an FLV, made one time when it is
+//         : compiled. a program has the name of its analysis, as the title
+//         : of its view has it: the name, or its place in its scope. a
+//         : directive has the name of its program, its kind, and the
+//         : label of its first emit. a table has no label, and a write
+//         : has no name, since the writes go to the file of the program.
+INTERNAL void
+CLIScriptNames(Arena* MemPool, CLIScript* Script)
+{
+    FLVUnit const* Unit = Script->Unit;
+    FLVLayoutNode const* Layout = Unit->Lowered.Layout;
+    u32 ProgramCount = Unit->Lowered.ProgramCount;
+
+    Script->ProgramNames = ArenaPushArrayZero(MemPool, Str8, ProgramCount);
+    Script->DirectiveNames = ArenaPushArrayZero(
+        MemPool,
+        Str8*,
+        ProgramCount
+    );
+
+    for (u32 Program = 0; Program < ProgramCount; ++Program) {
+        Str8 Name = {};
+
+        for (u32 Node = 0; Node < Unit->Lowered.LayoutCount; ++Node) {
+            if (Layout[Node].AnalysisIndex != Program)
+                continue;
+
+            Name = Unit->LayoutNames[Node].Size
+                ? Unit->LayoutNames[Node]
+                : ArenaPushStrFmt(MemPool, "%u", Layout[Node].Ordinal);
+
+            break;
+        }
+
+        if (!Name.Size)
+            Name = ArenaPushStrFmt(MemPool, "%u", Program);
+
+        Script->ProgramNames[Program] = CLIFileNameFromLabel(MemPool, Name);
+    }
+
+    CLINamesMakeUnique(MemPool, Script->ProgramNames, ProgramCount);
+
+    for (u32 Program = 0; Program < ProgramCount; ++Program) {
+        FLVProgram const* P = &Unit->Lowered.Program[Program];
+        u32 Count = 0;
+        u32 Ordinal = 0;
+
+        for (
+            u32 Head = 0;
+            Head < P->EmitCount;
+            Head = CLIDirectiveTail(P, Head)
+        ) {
+            ++Count;
+        }
+
+        Str8* Names = ArenaPushArrayZero(MemPool, Str8, Count);
+
+        for (
+            u32 Head = 0;
+            Head < P->EmitCount;
+            Head = CLIDirectiveTail(P, Head), ++Ordinal
+        ) {
+            u8 Kind = P->Emits[Head].DisplayKind;
+
+            if (Kind == TOKEN_KIND_WRITE)
+                continue;
+
+            if (Kind == TOKEN_KIND_TABLE) {
+                Names[Ordinal] = "table"_s8;
+                continue;
+            }
+
+            Str8 Label = CLIFileNameFromLabel(
+                MemPool,
+                P->Strings[P->Emits[Head].LabelStringIndex]
+            );
+
+            Names[Ordinal] = ArenaPushStrFmt(
+                MemPool,
+                "%s%s%S",
+                (Kind == TOKEN_KIND_FLAG) ? "flag" : "graph",
+                Label.Size ? "." : "",
+                PRINT_STR(Label)
+            );
+        }
+
+        CLINamesMakeUnique(MemPool, Names, Count);
+
+        for (Ordinal = 0; Ordinal < Count; ++Ordinal) {
+            if (!Names[Ordinal].Size)
+                continue;
+
+            Names[Ordinal] = ArenaPushStrFmt(
+                MemPool,
+                "%S.%S",
+                PRINT_STR(Script->ProgramNames[Program]),
+                PRINT_STR(Names[Ordinal])
+            );
+        }
+
+        Script->DirectiveNames[Program] = Names;
+    }
+}
+
+
+
 INTERNAL void
 CLICompileScripts(void)
 {
@@ -681,50 +856,19 @@ CLICompileScripts(void)
             S->SourceTime = MAX(S->SourceTime, Props.Modified);
         }
 
-        if (!S->Unit->HasError)
+        if (!S->Unit->HasError) {
             CLI_SHARED->ProgramsCount += S->Unit->Lowered.ProgramCount;
+            CLIScriptNames(CLI_SHARED->MemPool, S);
+        }
     }
 
     ReleaseScratch(Scratch);
 }
 
 
-// NOTE(nc): the emits of one directive are next to each other, with one
-//         : kind and one group. the result is the index after the last.
-INTERNAL u32
-CLIDirectiveTail(FLVProgram const* P, u32 Head)
-{
-    u32 Result = Head + 1;
 
-    while (
-        Result < P->EmitCount &&
-        P->Emits[Result].DisplayKind == P->Emits[Head].DisplayKind &&
-        P->Emits[Result].Group == P->Emits[Head].Group
-    ) {
-        ++Result;
-    }
-
-    return Result;
-}
-
-INTERNAL Str8
-CLIFileNameFromLabel(Arena* MemPool, Str8 Label)
-{
-    Str8 Result = ArenaPushStrCpy(
-        MemPool,
-        StrPrefix(Label, MIN(Label.Size, 48))
-    );
-
-    for (u64 Index = 0; Index < Result.Size; ++Index) {
-        u8 Byte = Result.Str[Index];
-
-        if (!IsAlpha(Byte) && !IsDigit(Byte) && Byte != '_' && Byte != '-')
-            Result.Str[Index] = '_';
-    }
-
-    return Result;
-}
-
+// NOTE(nc): the name is from CLIScriptNames. Ordinal is the place of the
+//         : directive in its program, with the writes counted.
 INTERNAL Str8
 CLIDirectivePath(
     Arena* MemPool,
@@ -736,8 +880,6 @@ CLIDirectivePath(
     u32 Ordinal
 ) {
     Str8 Dir = CLI_SHARED->OutputPath;
-    Str8 Kind = "graph"_s8;
-    Str8 Label = ""_s8;
     Str8 Ext = "csv"_s8;
 
     if (
@@ -747,9 +889,6 @@ CLIDirectivePath(
         Ext = "png"_s8;
     }
 
-    if (P->Emits[Head].DisplayKind == TOKEN_KIND_WRITE)
-        Ext = "txt"_s8;
-
     if (!Dir.Size) {
         Dir = StrChopLastSlash(Flight->FLIPath);
 
@@ -757,33 +896,13 @@ CLIDirectivePath(
             Dir = "."_s8;
     }
 
-    if (P->Emits[Head].DisplayKind == TOKEN_KIND_TABLE) {
-        Kind = "table"_s8;
-    } else if (P->Emits[Head].DisplayKind == TOKEN_KIND_WRITE) {
-        // NOTE(nc): the label of a write is its format, which is no name
-        //         : for a file. the ordinal tells the writes apart.
-        Kind = "write"_s8;
-    } else {
-        if (P->Emits[Head].DisplayKind == TOKEN_KIND_FLAG)
-            Kind = "flag"_s8;
-
-        Label = CLIFileNameFromLabel(
-            MemPool,
-            P->Strings[P->Emits[Head].LabelStringIndex]
-        );
-    }
-
     Str8 Result = ArenaPushStrFmt(
         MemPool,
-        "%S/%S.%S.p%u.d%u.%S%s%S.%S",
+        "%S/%S.%S.%S.%S",
         PRINT_STR(Dir),
         PRINT_STR(StrChopLastDot(StrSkipLastSlash(Flight->FLIPath))),
         PRINT_STR(StrChopLastDot(StrSkipLastSlash(Script->Path))),
-        Program,
-        Ordinal,
-        PRINT_STR(Kind),
-        Label.Size ? "." : "",
-        PRINT_STR(Label),
+        PRINT_STR(Script->DirectiveNames[Program][Ordinal]),
         PRINT_STR(Ext)
     );
 
@@ -806,7 +925,7 @@ CLIProgramHasWrites(FLVProgram const* P)
 }
 
 // NOTE(nc): all the writes of a program go to one file, so it has the
-//         : program in its name and no directive.
+//         : analysis in its name and no directive.
 INTERNAL Str8
 CLIWritesPath(
     Arena* MemPool,
@@ -825,11 +944,11 @@ CLIWritesPath(
 
     Str8 Result = ArenaPushStrFmt(
         MemPool,
-        "%S/%S.%S.p%u.write.txt",
+        "%S/%S.%S.%S.write.txt",
         PRINT_STR(Dir),
         PRINT_STR(StrChopLastDot(StrSkipLastSlash(Flight->FLIPath))),
         PRINT_STR(StrChopLastDot(StrSkipLastSlash(Script->Path))),
-        Program
+        PRINT_STR(Script->ProgramNames[Program])
     );
 
     return Result;
@@ -1190,6 +1309,58 @@ CLIGraphFlagsAndModes(
     }
 }
 
+// NOTE(nc): the legend, as rows at the top of the image, each name in the
+//         : colour of its curve or its flag. a label that does not fit in
+//         : a row is the first of the next row. with no image nothing is
+//         : drawn. the result is the number of rows, and the plot starts
+//         : below them.
+INTERNAL u32
+CLIGraphLegend(
+    FLAPRasterImage* Image,
+    FLAPRasterFont const* Font,
+    FLAPGraphDrawData const* Data,
+    u32 Width
+) {
+    f32 FontSize = Font->Size;
+    f32 LegendX = FontSize;
+    // NOTE(nc): the top of a glyph is the descent above the top of its
+    //         : line, and a glyph that is not all in the image is not
+    //         : drawn. so the text is in the middle of its row, and the
+    //         : first row is never at the edge of the image.
+    f32 TextY = MAX(
+        0.5f * (CLI_GRAPH_ROW_HEIGHT - FontSize),
+        Font->Descent + 1.0f
+    );
+    u32 Result = 1;
+
+    for (u32 Index = 0; Index < Data->LabelsCount; ++Index) {
+        FLAPGraphDrawLabel* Label = &Data->Labels[Index];
+        f32 LabelWidth = FLAPRasterTextWidth(Font, Label->String);
+
+        if (LegendX > FontSize && LegendX + LabelWidth > (f32) Width) {
+            LegendX = FontSize;
+            ++Result;
+        }
+
+        if (Image) {
+            FLAPRasterText(
+                Image,
+                Font,
+                Vec(
+                    LegendX,
+                    (f32) (Result - 1) * CLI_GRAPH_ROW_HEIGHT + TextY
+                ),
+                Label->String,
+                FLAPGraphMinimapPixel(Label->Colour)
+            );
+        }
+
+        LegendX += LabelWidth + 2.0f * FontSize;
+    }
+
+    return Result;
+}
+
 // NOTE(nc): the draw data of the graph of one directive, as FLAPGraph
 //         : makes it for its box. the time range is the fit of the curves
 //         : and the value axes are the fit of the data in it. there is no
@@ -1286,12 +1457,8 @@ CLIGraphDataFromDirective(
     }
 
     Data->PlotX = Gutter;
-    Data->PlotY = RowHeight;
     Data->Width = (Width > Gutters)
         ? Width - Gutters
-        : 0;
-    Data->Height = (Height > 2 * RowHeight)
-        ? Height - 2 * RowHeight
         : 0;
 
     if (Fit.Min < Fit.Max)
@@ -1310,6 +1477,9 @@ CLIGraphDataFromDirective(
     Data->View = View;
 
     for (u32 Index = Head; Index < Tail; ++Index) {
+        if (P->Emits[Index].DisplayKind != TOKEN_KIND_GRAPH)
+            continue;
+
         FLAPGraphDrawLabel* Label = &Data->Labels[Data->LabelsCount++];
         Str8 Name = P->Strings[P->Emits[Index].LabelStringIndex];
 
@@ -1369,6 +1539,18 @@ CLIGraphDataFromDirective(
     }
 
     CLIGraphFlagsAndModes(MemPool, FLI, P, Items, Data);
+
+    // NOTE(nc): the legend has all its labels now, so its rows are known.
+    //         : the plot is below them and above the row of the time.
+    u32 LegendRows = CLI_SHARED->GraphFont
+        ? CLIGraphLegend(NULL, CLI_SHARED->GraphFont, Data, Width)
+        : 1;
+    u32 Rows = (LegendRows + 1) * RowHeight;
+
+    Data->PlotY = LegendRows * RowHeight;
+    Data->Height = (Height > Rows)
+        ? Height - Rows
+        : 0;
 
     for (u32 Axis = 0; Axis < 2; ++Axis) {
         if (Data->ValueRanges[Axis].Max <= Data->ValueRanges[Axis].Min) {
@@ -1754,26 +1936,8 @@ CLIGraphLabels(
 ) {
     f32 FontSize = Font->Size;
     u32 LabelPixel = FLAPGraphMinimapPixel(Data->LabelColour);
-    f32 LegendX = FontSize;
 
-    for (
-        u32 Index = 0;
-        Index < Data->LabelsCount && LegendX < (f32) Image->Width;
-        ++Index
-    ) {
-        FLAPGraphDrawLabel* Label = &Data->Labels[Index];
-
-        FLAPRasterText(
-            Image,
-            Font,
-            Vec(LegendX, 0.0f),
-            Label->String,
-            FLAPGraphMinimapPixel(Label->Colour)
-        );
-        LegendX += (
-            FLAPRasterTextWidth(Font, Label->String) + 2.0f * FontSize
-        );
-    }
+    CLIGraphLegend(Image, Font, Data, Image->Width);
 
     // NOTE(nc): value labels, left axis then right axis
     for (u32 Axis = 0; Axis < 2; ++Axis) {
@@ -1915,80 +2079,51 @@ CLIGraphModesAndFlags(
         }
     }
 
-    // NOTE(nc): the ranges of a flag that share a pixel are one rect
+    // NOTE(nc): the flags, on the row of the time below the plot, as
+    //         : FLAPGraphDraw has them. the flags that are at one pixel
+    //         : share the height of the row in equal parts.
     if (Data->FlagsCount) {
-        u8* Bands = ArenaPushArray(MemPool, u8, Width);
-        i32 Lane = (i32) MAX(3.0f, FloorF32(0.4f * CLI_GRAPH_FONT_SIZE));
+        u64* Masks = FLAPGraphFlagMasks(MemPool, Data);
+        i32 RowHeight = (i32) CLI_GRAPH_ROW_HEIGHT;
 
-        for (u32 FlagIndex = 0; FlagIndex < Data->FlagsCount; ++FlagIndex) {
-            FLVRenderFlag const* Flag = Data->Flags[FlagIndex];
-            i32 LaneY1 = Plot.Y1 - (i32) FlagIndex * Lane;
-            u32 Pixel = FLAPGraphMinimapPixel(Data->FlagColours[FlagIndex]);
+        for (u32 Band = 0; Band < Width; ) {
+            u64 Mask = Masks[Band];
+            u32 Start = Band;
 
-            // NOTE(nc): no room for more lanes
-            if (LaneY1 - Lane < Plot.Y0)
-                break;
+            for ( ; Band < Width && Masks[Band] == Mask; ++Band);
 
-            MemZero(Bands, Width);
+            if (!Mask)
+                continue;
 
-            for (u64 Index = 0; Index < Flag->Count; ++Index) {
-                r1u64 Range = Flag->Ranges[Index];
+            i32 Count = (i32) PopCount64(Mask);
+            i32 Part = 0;
 
-                if (Range.Max <= ViewRange.Min || Range.Min >= ViewRange.Max)
-                    continue;
+            for (u64 Bits = Mask; Bits; Bits &= Bits - 1, ++Part) {
+                v4f32 Colour = Data->FlagColours[Ctz64(Bits)];
 
-                u32 First = MIN(
-                    (u32) (
-                        (f64) (
-                            MAX(Range.Min, ViewRange.Min) - ViewRange.Min
-                        ) * PXPerUSec
-                    ),
-                    Width - 1
-                );
-                u32 Last = MIN(
-                    (u32) (
-                        (f64) (
-                            MIN(Range.Max, ViewRange.Max) - 1 - ViewRange.Min
-                        ) * PXPerUSec
-                    ),
-                    Width - 1
-                );
-
-                for (u32 Band = First; Band <= Last; ++Band)
-                    Bands[Band] = 1;
-            }
-
-            for (u32 Band = 0; Band < Width; ) {
-                if (!Bands[Band]) {
-                    ++Band;
-                    continue;
-                }
-
-                u32 Start = Band;
-
-                for ( ; Band < Width && Bands[Band]; ++Band);
-
-                FLAPRasterFill(
+                FLAPRasterBlend(
                     Image,
                     Rng(
                         Plot.X0 + (i32) Start,
-                        LaneY1 - Lane,
+                        Plot.Y1 + (RowHeight * Part) / Count,
                         Plot.X0 + (i32) Band,
-                        LaneY1
+                        Plot.Y1 + (RowHeight * (Part + 1)) / Count
                     ),
-                    Pixel
+                    FLAPGraphMinimapPixel(Colour),
+                    FLAP_GRAPH_FLAG_ALPHA * Colour.W
                 );
             }
         }
     }
 }
 
-// NOTE(nc): the graph as a picture: the background, the plot, and each
-//         : curve as a mask that is blended over them in its colour.
+// NOTE(nc): the graph as a picture in the image of the canvas: the
+//         : background, the plot, and each curve as a mask that is
+//         : blended over them in its colour. the image is all the graph,
+//         : so a graph of a tab has a canvas of its own size.
 INTERNAL b32
-CLIExportGraphImage(
+CLIGraphImage(
     Arena* MemPool,
-    FLAPExportWriter* Writer,
     FLAPRasterCanvas* Canvas,
     Access* Acc,
     CLIFlight* Flight,
@@ -2001,7 +2136,6 @@ CLIExportGraphImage(
     FLAPRasterImage* Image = &Canvas->Image;
     FLAPRasterMask* Mask = &Canvas->Mask;
     FLAPGraphDrawData Data = {};
-    FLAPExportSource Source = {};
     i32 Width = (i32) Image->Width;
     i32 Height = (i32) Image->Height;
     b32 Result = CLIGraphDataFromDirective(
@@ -2084,8 +2218,591 @@ CLIExportGraphImage(
         );
     }
 
-    Source.Pixels = (u8*) Image->Pixels;
-    Source.Size = Vec(Width, Height);
+    return Result;
+}
+
+// NOTE(nc): an FLV has a picture of its tab when the graphs are pictures
+//         : and it has a layout.
+INTERNAL b32
+CLIScriptHasTab(CLIScript* Script)
+{
+    b32 Result = (
+        !CLI_SHARED->IsGraphCSV &&
+        Script->Unit &&
+        Script->Unit->Lowered.LayoutCount
+    );
+
+    return Result;
+}
+
+// NOTE(nc): the picture of all the analyses of an FLV, so it has the
+//         : flight and the FLV in its name and no program.
+INTERNAL Str8
+CLITabPath(Arena* MemPool, CLIFlight* Flight, CLIScript* Script)
+{
+    Str8 Dir = CLI_SHARED->OutputPath;
+
+    if (!Dir.Size) {
+        Dir = StrChopLastSlash(Flight->FLIPath);
+
+        if (Dir.Size == Flight->FLIPath.Size)
+            Dir = "."_s8;
+    }
+
+    Str8 Result = ArenaPushStrFmt(
+        MemPool,
+        "%S/%S.%S.tab.png",
+        PRINT_STR(Dir),
+        PRINT_STR(StrChopLastDot(StrSkipLastSlash(Flight->FLIPath))),
+        PRINT_STR(StrChopLastDot(StrSkipLastSlash(Script->Path)))
+    );
+
+    return Result;
+}
+
+// NOTE(nc): an FLV with no picture of its tab has nothing to be stale
+INTERNAL b32
+CLITabIsFresh(Arena* MemPool, CLIFlight* Flight, CLIScript* Script)
+{
+    b32 Result = TRUE;
+
+    if (CLIScriptHasTab(Script)) {
+        u64 Position = ArenaGetPosition(MemPool);
+        FileProperties Props = SystemGetFileProperties(
+            CLITabPath(MemPool, Flight, Script)
+        );
+
+        Result = (
+            !CLI_SHARED->IsForced &&
+            Props.Modified > MAX(Flight->FLITime, Script->SourceTime)
+        );
+        ArenaPopTo(MemPool, Position);
+    }
+
+    return Result;
+}
+
+// NOTE(nc): the rect of each node of the layout, as FLAPLayoutUI has them
+//         : with no overrides: the children of a node share its rect in
+//         : equal parts, with a boundary between two of them.
+INTERNAL r2i32*
+CLITabRects(Arena* MemPool, FLVUnit const* Unit, v2i32 Size)
+{
+    FLVLayoutNode const* Layout = Unit->Lowered.Layout;
+    r2i32* Result = ArenaPushArrayZero(
+        MemPool,
+        r2i32,
+        Unit->Lowered.LayoutCount
+    );
+    i32 Boundary = (i32) CLI_GRAPH_FONT_SIZE;
+
+    Result[0] = Rng(0, 0, Size.X, Size.Y);
+
+    for (
+        u32 Index = 0;
+        Index != U32_MAX;
+        Index = FLAPLayoutRecDepthFirstPre(Layout, Index).Next
+    ) {
+        FLVLayoutNode const* Node = &Layout[Index];
+
+        if (Node->AnalysisIndex != U32_MAX || !Node->ChildCount)
+            continue;
+
+        Axis2D Axis = (Node->Depth & 1) ? AXIS_2D_X : AXIS_2D_Y;
+        r2i32 Rect = Result[Index];
+        i32 Count = (i32) Node->ChildCount;
+        i32 Total = MAX(
+            (Rect.Max.V[Axis] - Rect.Min.V[Axis]) - (Count - 1) * Boundary,
+            0
+        );
+
+        for (i32 Child = 0; Child < Count; ++Child) {
+            r2i32* ChildRect = &Result[Node->HeadChild + (u32) Child];
+            i32 Start = Rect.Min.V[Axis] + Child * Boundary;
+
+            *ChildRect = Rect;
+            ChildRect->Min.V[Axis] = Start + (Total * Child) / Count;
+            ChildRect->Max.V[Axis] = Start + (Total * (Child + 1)) / Count;
+        }
+    }
+
+    return Result;
+}
+
+// NOTE(nc): Src over Dst, with its corner at Origin. the part of Src that
+//         : is not in Dst is not copied.
+INTERNAL void
+CLITabBlit(FLAPRasterImage* Dst, FLAPRasterImage const* Src, v2i32 Origin)
+{
+    r2i32 Clip = Intersect(
+        Rng(
+            Origin.X,
+            Origin.Y,
+            Origin.X + (i32) Src->Width,
+            Origin.Y + (i32) Src->Height
+        ),
+        Rng(0, 0, (i32) Dst->Width, (i32) Dst->Height)
+    );
+
+    if (Clip.X1 <= Clip.X0)
+        return;
+
+    for (i32 Y = Clip.Y0; Y < Clip.Y1; ++Y) {
+        MemCpy(
+            Dst->Pixels + (u64) Y * Dst->Width + Clip.X0,
+            (
+                Src->Pixels +
+                (u64) (Y - Origin.Y) * Src->Width +
+                (Clip.X0 - Origin.X)
+            ),
+            sizeof(u32) * (u64) (Clip.X1 - Clip.X0)
+        );
+    }
+}
+
+// NOTE(nc): the start of the string that is not wider than Width
+INTERNAL Str8
+CLITabStrFit(FLAPRasterFont const* Font, Str8 String, f32 Width)
+{
+    Str8 Result = String;
+    f32 Used = 0.0f;
+
+    for (u64 Index = 0; Index < String.Size; ++Index) {
+        u32 Code = String.Str[Index];
+
+        if (
+            Code >= FLAP_RASTER_GLYPH_FIRST &&
+            Code < FLAP_RASTER_GLYPH_FIRST + FLAP_RASTER_GLYPH_COUNT
+        ) {
+            Used += Font->Glyphs[Code - FLAP_RASTER_GLYPH_FIRST].Advance;
+        }
+
+        if (Used > Width) {
+            Result.Size = Index;
+            break;
+        }
+    }
+
+    return Result;
+}
+
+// NOTE(nc): one line of text in its cell, at the left of it or at the
+//         : right. the text that has no room in the cell is not drawn.
+INTERNAL void
+CLITabText(
+    FLAPRasterImage* Image,
+    FLAPRasterFont const* Font,
+    r2i32 Cell,
+    Str8 String,
+    u32 Pixel,
+    b32 IsRight
+) {
+    f32 Pad = 0.5f * Font->Size;
+    f32 Room = (f32) (Cell.X1 - Cell.X0) - 2.0f * Pad;
+
+    if (Room <= 0.0f)
+        return;
+
+    Str8 Fit = CLITabStrFit(Font, String, Room);
+    f32 X = IsRight
+        ? (f32) Cell.X1 - Pad - FLAPRasterTextWidth(Font, Fit)
+        : (f32) Cell.X0 + Pad;
+    f32 Y = (f32) Cell.Y0 + 0.5f * (
+        (f32) (Cell.Y1 - Cell.Y0) - Font->Size
+    );
+
+    FLAPRasterText(Image, Font, Vec(X, Y), Fit, Pixel);
+}
+
+// NOTE(nc): the table as the app shows it at its top: the row of names
+//         : and the rows that fit below it. the columns share the width
+//         : in equal parts. a row at a time that a flag has is tinted.
+INTERNAL void
+CLITabTable(
+    Arena* MemPool,
+    FLAPRasterImage* Image,
+    FLAPRasterFont const* Font,
+    Access* Acc,
+    CLIFlight* Flight,
+    FLIParsed* FLI,
+    FLVProgram const* P,
+    FLVRenderItem* Items,
+    u32 HeadEmit,
+    r2i32 Rect
+) {
+    FLAPTableParams Params = {};
+    FLAPTableCtx Ctx = {};
+    i32 RowHeight = (i32) CLI_GRAPH_ROW_HEIGHT;
+    u32 LabelPixel = FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_LABEL);
+
+    Params.Acc = Acc;
+    Params.FLI = FLI;
+    Params.Program = P;
+    Params.Items = Items;
+    Params.Flight = Flight->Key;
+    Params.HeadEmit = HeadEmit;
+
+    if (
+        !FLAPTableCtxFromParams(MemPool, &Params, &Ctx) ||
+        (Ctx.Table->RowCount && Ctx.Time.IsMissing)
+    ) {
+        return;
+    }
+
+    FLVRenderTable const* Table = Ctx.Table;
+    i32 ColumnCount = (i32) Table->ColumnCount + 1;
+    Str8* Cells = ArenaPushArray(MemPool, Str8, (u64) ColumnCount);
+    i32 Width = Rect.X1 - Rect.X0;
+    r2i32 Row = Rng(Rect.X0, Rect.Y0, Rect.X1, Rect.Y0 + RowHeight);
+
+    FLAPRasterFill(
+        Image,
+        Row,
+        FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_PLOT)
+    );
+
+    for (i32 Column = 0; Column < ColumnCount; ++Column) {
+        r2i32 Cell = Row;
+
+        Cell.X0 = Rect.X0 + (Width * Column) / ColumnCount;
+        Cell.X1 = Rect.X0 + (Width * (Column + 1)) / ColumnCount;
+        CLITabText(
+            Image,
+            Font,
+            Cell,
+            Column
+                ? P->Strings[Table->Columns[Column - 1].LabelStringIndex]
+                : "time"_s8,
+            LabelPixel,
+            FALSE
+        );
+    }
+
+    u64 RowPosition = ArenaGetPosition(MemPool);
+
+    for (u64 Index = 0; Index < Table->RowCount; ++Index) {
+        u64 TimeUSecs = 0;
+
+        Row.Y0 += RowHeight;
+        Row.Y1 += RowHeight;
+
+        // NOTE(nc): no room for more rows
+        if (Row.Y1 > Rect.Y1)
+            break;
+
+        FLAPExportTableRow(MemPool, &Ctx, Index, Cells, &TimeUSecs);
+
+        if (FLAPTimeIsFlagged(&Ctx, TimeUSecs))
+            FLAPRasterBlend(Image, Row, LabelPixel, CLI_TAB_ROW_ALPHA);
+
+        for (i32 Column = 0; Column < ColumnCount; ++Column) {
+            r2i32 Cell = Row;
+            b32 IsRight = (
+                !Column ||
+                !FLAPScalarKindIsChar(Table->Columns[Column - 1].Kind)
+            );
+
+            Cell.X0 = Rect.X0 + (Width * Column) / ColumnCount;
+            Cell.X1 = Rect.X0 + (Width * (Column + 1)) / ColumnCount;
+            CLITabText(
+                Image,
+                Font,
+                Cell,
+                Cells[Column],
+                LabelPixel,
+                IsRight
+            );
+        }
+
+        ArenaPopTo(MemPool, RowPosition);
+    }
+}
+
+// NOTE(nc): the lines of the flags, as FLAPFlagList has them, for the
+//         : rows that fit.
+INTERNAL void
+CLITabFlagList(
+    Arena* MemPool,
+    FLAPRasterImage* Image,
+    FLAPRasterFont const* Font,
+    FLVProgram const* P,
+    FLVRenderItem* Items,
+    r2i32 Rect
+) {
+    i32 RowHeight = (i32) CLI_GRAPH_ROW_HEIGHT;
+    u32 LabelPixel = FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_LABEL);
+    r2i32 Row = Rng(Rect.X0, Rect.Y0, Rect.X1, Rect.Y0 + RowHeight);
+    u64 Position = ArenaGetPosition(MemPool);
+    u64 LineCount = 0;
+
+    for (u32 Index = 0; Index < P->EmitCount; ++Index) {
+        if (P->Emits[Index].DisplayKind == TOKEN_KIND_FLAG) {
+            LineCount += Items[Index].IsMissing
+                ? 1
+                : 1 + Items[Index].Flag.Count;
+        }
+    }
+
+    for (u64 Line = 0; Line < LineCount && Row.Y1 <= Rect.Y1; ++Line) {
+        CLITabText(
+            Image,
+            Font,
+            Row,
+            FLAPFlagLine(MemPool, P, Items, Line),
+            LabelPixel,
+            FALSE
+        );
+        Row.Y0 += RowHeight;
+        Row.Y1 += RowHeight;
+        ArenaPopTo(MemPool, Position);
+    }
+}
+
+// NOTE(nc): one analysis in its rect of the tab, as FLAPAnalysisUI has
+//         : it: the row of its title, the lines of its writes, and then
+//         : its graph, or its table, or the list of its flags. the graph
+//         : is all the curves of the program. the text is drawn in an
+//         : image of the size of the rect, so it is cut at its edges.
+//         : the result is FALSE when a column of the graph is not ready.
+INTERNAL b32
+CLITabAnalysis(
+    Arena* MemPool,
+    FLAPRasterImage* Tab,
+    Access* Acc,
+    CLIFlight* Flight,
+    FLIParsed* FLI,
+    FLVUnit const* Unit,
+    u32 NodeIndex,
+    FLVRenderItem* Items,
+    r2i32 Rect
+) {
+    b32 Result = TRUE;
+    FLVLayoutNode const* Node = &Unit->Lowered.Layout[NodeIndex];
+    FLVProgram const* P = &Unit->Lowered.Program[Node->AnalysisIndex];
+    FLAPRasterFont const* Font = CLI_SHARED->GraphFont;
+    i32 Width = Rect.X1 - Rect.X0;
+    i32 Height = Rect.Y1 - Rect.Y0;
+    i32 RowHeight = (i32) CLI_GRAPH_ROW_HEIGHT;
+
+    if (Width <= 0 || Height <= 0)
+        return Result;
+
+    u64 Position = ArenaGetPosition(MemPool);
+    FLAPRasterImage Cell = FLAPRasterImageAlloc(
+        MemPool,
+        (u32) Width,
+        (u32) Height
+    );
+    r2i32 Body = Rng(0, RowHeight, Width, Height);
+    u32 LabelPixel = FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_LABEL);
+    Str8 Title = Unit->LayoutNames[NodeIndex];
+    u32 TableEmit = U32_MAX;
+    u32 FlagCount = 0;
+    u32 CurveCount = 0;
+
+    if (!Title.Size)
+        Title = ArenaPushStrFmt(MemPool, "%u", Node->Ordinal);
+
+    for (u32 Index = 0; Index < P->EmitCount; ++Index) {
+        u8 Kind = P->Emits[Index].DisplayKind;
+
+        if (
+            Kind == TOKEN_KIND_TABLE &&
+            TableEmit == U32_MAX &&
+            !Items[Index].IsMissing &&
+            Items[Index].Kind == FLV_RENDER_KIND_TABLE
+        ) {
+            TableEmit = Index;
+        }
+
+        if (Kind == TOKEN_KIND_FLAG)
+            ++FlagCount;
+
+        if (FLAPGraphEmitIsCurve(P, Items, Index))
+            ++CurveCount;
+    }
+
+    FLAPRasterFill(
+        &Cell,
+        Rng(0, 0, Width, Height),
+        FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_BACKGROUND)
+    );
+    FLAPRasterFill(
+        &Cell,
+        Rng(0, 0, Width, RowHeight),
+        FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_PLOT)
+    );
+
+    if (Font) {
+        CLITabText(
+            &Cell,
+            Font,
+            Rng(0, 0, Width, RowHeight),
+            Title,
+            LabelPixel,
+            FALSE
+        );
+    }
+
+    // NOTE(nc): the lines of the writes, above what the analysis shows.
+    //         : a write that did not run has no line.
+    for (u32 Index = 0; Font && Index < P->EmitCount; ++Index) {
+        if (
+            P->Emits[Index].DisplayKind != TOKEN_KIND_WRITE ||
+            Items[Index].IsMissing ||
+            Items[Index].Kind != FLV_RENDER_KIND_TEXT
+        ) {
+            continue;
+        }
+
+        Str8 Text = Items[Index].Text;
+
+        for (u64 Start = 0; Start <= Text.Size; ) {
+            u64 End = Start;
+
+            for ( ; End < Text.Size && Text.Str[End] != '\n'; ++End);
+
+            // NOTE(nc): no room for more lines
+            if (Body.Y1 - Body.Y0 < 2 * RowHeight)
+                break;
+
+            CLITabText(
+                &Cell,
+                Font,
+                Rng(0, Body.Y0, Width, Body.Y0 + RowHeight),
+                StrSub(Text, Rng(Start, End)),
+                LabelPixel,
+                FALSE
+            );
+            Body.Y0 += RowHeight;
+            Start = End + 1;
+        }
+    }
+
+    if (CurveCount) {
+        CLITabBlit(Tab, &Cell, Vec(Rect.X0, Rect.Y0));
+
+        if (Body.Y1 > Body.Y0) {
+            FLAPRasterCanvas Canvas = FLAPRasterCanvasAlloc(
+                MemPool,
+                (u32) Width,
+                (u32) (Body.Y1 - Body.Y0)
+            );
+
+            Result = CLIGraphImage(
+                MemPool,
+                &Canvas,
+                Acc,
+                Flight,
+                FLI,
+                P,
+                Items,
+                0,
+                P->EmitCount
+            );
+            CLITabBlit(
+                Tab,
+                &Canvas.Image,
+                Vec(Rect.X0, Rect.Y0 + Body.Y0)
+            );
+        }
+    } else {
+        if (Font && TableEmit != U32_MAX) {
+            CLITabTable(
+                MemPool,
+                &Cell,
+                Font,
+                Acc,
+                Flight,
+                FLI,
+                P,
+                Items,
+                TableEmit,
+                Body
+            );
+        } else if (Font && FlagCount) {
+            CLITabFlagList(MemPool, &Cell, Font, P, Items, Body);
+        }
+
+        CLITabBlit(Tab, &Cell, Vec(Rect.X0, Rect.Y0));
+    }
+
+    ArenaPopTo(MemPool, Position);
+
+    return Result;
+}
+
+// NOTE(nc): the file is made with another name and moved, as
+//         : CLIExportDirective does.
+INTERNAL b32
+CLIExportTab(
+    Arena* MemPool,
+    u8* Chunk,
+    FLAPRasterImage* Tab,
+    Str8 FilePath
+) {
+    b32 Result = FALSE;
+    u64 Position = ArenaGetPosition(MemPool);
+    Str8 TempPath = ArenaPushStrFmt(MemPool, "%S.tmp", PRINT_STR(FilePath));
+    FLAPExportWriter Writer = {};
+
+    Writer.File = SystemOpenFile(SYS_ACCESS_WRITE, TempPath);
+
+    if (Writer.File != EMPTY_HANDLE_VALUE) {
+        FLAPExportSource Source = {};
+
+        Writer.Capacity = FLAP_EXPORT_CHUNK_SIZE;
+        Writer.Chunk = Chunk;
+        Source.Pixels = (u8*) Tab->Pixels;
+        Source.Size = Vec((i32) Tab->Width, (i32) Tab->Height);
+        Result = FLAP_EXPORT_FUNC_NAME(PNG)(MemPool, &Source, &Writer);
+        FLAPExportFlush(&Writer);
+        Result = (Result && !Writer.HasFailed);
+        SystemCloseFile(Writer.File);
+
+        if (Result)
+            Result = SystemMoveFile(FilePath, TempPath);
+
+        if (!Result)
+            SystemDeleteFile(TempPath);
+    }
+
+    ArenaPopTo(MemPool, Position);
+
+    return Result;
+}
+
+INTERNAL b32
+CLIExportGraphImage(
+    Arena* MemPool,
+    FLAPExportWriter* Writer,
+    FLAPRasterCanvas* Canvas,
+    Access* Acc,
+    CLIFlight* Flight,
+    FLIParsed* FLI,
+    FLVProgram const* P,
+    FLVRenderItem* Items,
+    u32 Head,
+    u32 Tail
+) {
+    FLAPExportSource Source = {};
+    b32 Result = CLIGraphImage(
+        MemPool,
+        Canvas,
+        Acc,
+        Flight,
+        FLI,
+        P,
+        Items,
+        Head,
+        Tail
+    );
+
+    Source.Pixels = (u8*) Canvas->Image.Pixels;
+    Source.Size = Vec(
+        (i32) Canvas->Image.Width,
+        (i32) Canvas->Image.Height
+    );
     Result = (
         FLAP_EXPORT_FUNC_NAME(PNG)(MemPool, &Source, Writer) &&
         Result
@@ -2330,12 +3047,18 @@ CLIRunFlights(Arena* MemPool)
     Arena* RunMemPool = ArenaAlloc();
     u8* Chunk = ArenaPushArray(MemPool, u8, FLAP_EXPORT_CHUNK_SIZE);
     FLAPRasterCanvas Canvas = {};
+    FLAPRasterImage Tab = {};
 
     if (!CLI_SHARED->IsGraphCSV) {
         Canvas = FLAPRasterCanvasAlloc(
             MemPool,
             (u32) CLI_SHARED->GraphSize.X,
             (u32) CLI_SHARED->GraphSize.Y
+        );
+        Tab = FLAPRasterImageAlloc(
+            MemPool,
+            (u32) CLI_SHARED->TabSize.X,
+            (u32) CLI_SHARED->TabSize.Y
         );
     }
 
@@ -2368,12 +3091,17 @@ CLIRunFlights(Arena* MemPool)
             if (!Unit || Unit->HasError)
                 continue;
 
+            // NOTE(nc): the picture of the tab is made from all the
+            //         : programs of its FLV, so when it is not fresh none
+            //         : of them is.
+            b32 IsTabFresh = CLITabIsFresh(MemPool, Flight, S);
+
             for (
                 u32 Program = 0;
                 Program < Unit->Lowered.ProgramCount;
                 ++Program, ++Slot
             ) {
-                IsFresh[Slot] = CLIProgramIsFresh(
+                IsFresh[Slot] = IsTabFresh && CLIProgramIsFresh(
                     MemPool,
                     Flight,
                     S,
@@ -2479,6 +3207,26 @@ CLIRunFlights(Arena* MemPool)
                 continue;
             }
 
+            // NOTE(nc): the tab is stale, so all the programs run, and
+            //         : each one draws its analyses in the image.
+            u64 ScriptPosition = ArenaGetPosition(MemPool);
+            b32 IsTabStale = !CLITabIsFresh(MemPool, Flight, S);
+            b32 IsTabReady = TRUE;
+            r2i32* TabRects = NULL;
+
+            if (IsTabStale) {
+                TabRects = CLITabRects(
+                    MemPool,
+                    Unit,
+                    Vec((i32) Tab.Width, (i32) Tab.Height)
+                );
+                FLAPRasterFill(
+                    &Tab,
+                    Rng(0, 0, (i32) Tab.Width, (i32) Tab.Height),
+                    FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_PLOT)
+                );
+            }
+
             for (
                 u32 Program = 0;
                 Program < Unit->Lowered.ProgramCount;
@@ -2580,10 +3328,54 @@ CLIRunFlights(Arena* MemPool)
                     }
                 }
 
+                for (
+                    u32 Node = 0;
+                    IsTabStale && Node < Unit->Lowered.LayoutCount;
+                    ++Node
+                ) {
+                    if (Unit->Lowered.Layout[Node].AnalysisIndex != Program)
+                        continue;
+
+                    IsTabReady &= CLITabAnalysis(
+                        MemPool,
+                        &Tab,
+                        Acc,
+                        Flight,
+                        &FLI,
+                        Unit,
+                        Node,
+                        Lane.Items,
+                        TabRects[Node]
+                    );
+                }
+
                 AccessClose(Acc);
                 ArenaPopTo(MemPool, Position);
                 ArenaClear(RunMemPool);
             }
+
+            if (IsTabStale) {
+                Str8 Path = CLITabPath(MemPool, Flight, S);
+                b32 IsWritten = (
+                    IsTabReady &&
+                    CLIExportTab(MemPool, Chunk, &Tab, Path)
+                );
+
+                if (IsWritten) {
+                    AtomicIncFetchU64(
+                        &CLI_SHARED->ExportedCount,
+                        MEM_ORDER_SEQ_CST
+                    );
+                } else {
+                    AtomicIncFetchU64(
+                        &CLI_SHARED->FailCount,
+                        MEM_ORDER_SEQ_CST
+                    );
+                    PrintErr("failed to write %S\n", PRINT_STR(Path));
+                }
+            }
+
+            ArenaPopTo(MemPool, ScriptPosition);
         }
 
         ArenaPopTo(MemPool, FlightPosition);
@@ -2681,6 +3473,10 @@ CLIEntryPoint(CommandLine* CLI)
             "--import:<dir>      A folder that FLV imports are looked for in.\n\n"
             "--graph_width:<n>   The width of a graph image, in pixels.\n\n"
             "--graph_height:<n>  The height of a graph image, in pixels.\n\n"
+            "--tab_width:<n>     The width of the image of all the\n"
+            "                    analyses of an FLV, in pixels.\n\n"
+            "--tab_height:<n>    The height of that image, in pixels. It is\n"
+            "                    not written with --graph_csv.\n\n"
             "--graph_csv         A graph is written as CSV and not as PNG.\n\n"
             "--graph_grid        A graph image has a line at each tick.\n\n"
             "--graph_font:<file> The font of the text of a graph image. It\n"
@@ -2688,7 +3484,7 @@ CLIEntryPoint(CommandLine* CLI)
             "--graph_modes       A graph image has the flight modes as a\n"
             "                    tint of its plot.\n\n"
             "--graph_flags       A graph image has the flags of its program\n"
-            "                    as lanes at the bottom of its plot.\n"
+            "                    as colours on its time scale.\n"
         );
 
         return;
@@ -2762,6 +3558,30 @@ CLIEntryPoint(CommandLine* CLI)
         CLI_SHARED->GraphSize.Y = (i32) CLAMP(
             (u64) CLI_GRAPH_SIZE_MIN,
             U64FromStr(GraphHeightRaw),
+            (u64) CLI_GRAPH_SIZE_MAX
+        );
+    }
+
+    CLI_SHARED->TabSize = Vec(
+        (i32) CLI_TAB_WIDTH,
+        (i32) CLI_TAB_HEIGHT
+    );
+
+    Str8 TabWidthRaw = CommandLineString(CLI, "tab_width"_s8);
+    Str8 TabHeightRaw = CommandLineString(CLI, "tab_height"_s8);
+
+    if (TabWidthRaw.Size) {
+        CLI_SHARED->TabSize.X = (i32) CLAMP(
+            (u64) CLI_GRAPH_SIZE_MIN,
+            U64FromStr(TabWidthRaw),
+            (u64) CLI_GRAPH_SIZE_MAX
+        );
+    }
+
+    if (TabHeightRaw.Size) {
+        CLI_SHARED->TabSize.Y = (i32) CLAMP(
+            (u64) CLI_GRAPH_SIZE_MIN,
+            U64FromStr(TabHeightRaw),
             (u64) CLI_GRAPH_SIZE_MAX
         );
     }

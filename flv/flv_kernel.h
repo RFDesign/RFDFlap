@@ -44,6 +44,16 @@ enum : u16 {
 #define FLV_SELECTION_CHUNK_RANGES U8_MAX
 #define FLV_VALUE_CHUNK_BYTES      KB(16)
 
+#if !defined(FLV_KERNEL_SIMD)
+    #if NC_SIMD_LEVEL >= 7
+        #define FLV_KERNEL_SIMD 1
+    #else
+        #define FLV_KERNEL_SIMD 0
+    #endif
+#endif
+
+#define FLV_WIDE 4
+
 #define FLV_ARITH_HEAD(Type)                                                \
     if (FLVTempIsMissing(Lane, Op.LHS) || FLVTempIsMissing(Lane, Op.RHS)) { \
         FLVTempSetMissing(Lane, Op.Dst);                                    \

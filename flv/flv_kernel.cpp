@@ -6,6 +6,7 @@
 #include "nc_string.h"
 #include "nc_time.h"
 #include "nc_log.h"
+#include "nc_simd.h"
 
 #include "fli.h"
 
@@ -738,6 +739,142 @@ FLV_KERNEL_FUNC_SIG(FLVKernelCONVERT_I64_F64)
         Dst[Index] = (A[Index] == FLV_I64_HOLE) ? NC_NAN : (f64) A[Index];
 }
 
+#if FLV_KERNEL_SIMD
+    #define FLV_WIDE_TYPE_F64         v256d
+    #define FLV_WIDE_TYPE_I64         v256
+    #define FLV_WIDE_LOAD_F64(P)      _mm256_loadu_pd((f64 const*) (P))
+    #define FLV_WIDE_LOAD_I64(P)      _mm256_loadu_si256((v256 const*) (P))
+    #define FLV_WIDE_STORE_F64(P, V)  _mm256_storeu_pd((f64*) (P), (V))
+    #define FLV_WIDE_STORE_I64(P, V)  _mm256_storeu_si256((v256*) (P), (V))
+    #define FLV_WIDE_SET_F64(X)       _mm256_set1_pd(X)
+    #define FLV_WIDE_SET_I64(X)       _mm256_set1_epi64x(X)
+    #define FLV_WIDE_BITS_F64(V)      ((u64) _mm256_movemask_pd(V))
+    #define FLV_WIDE_BITS_I64(V)      ((u64) _mm256_movemask_pd(_mm256_castsi256_pd(V)))
+    #define FLV_WIDE_ADD_F64(A, B)    _mm256_add_pd((A), (B))
+    #define FLV_WIDE_SUB_F64(A, B)    _mm256_sub_pd((A), (B))
+    #define FLV_WIDE_MUL_F64(A, B)    _mm256_mul_pd((A), (B))
+    #define FLV_WIDE_DIV_F64(A, B)    _mm256_div_pd((A), (B))
+    #define FLV_WIDE_MOD_F64(A, B)    FLVWideModF64((A), (B))
+    #define FLV_WIDE_ADD_I64(A, B)    _mm256_add_epi64((A), (B))
+    #define FLV_WIDE_SUB_I64(A, B)    _mm256_sub_epi64((A), (B))
+    #define FLV_WIDE_CMP_LT_F64(A, B) FLV_WIDE_BITS_F64(_mm256_cmp_pd((A), (B), _CMP_LT_OQ))
+    #define FLV_WIDE_CMP_LE_F64(A, B) FLV_WIDE_BITS_F64(_mm256_cmp_pd((A), (B), _CMP_LE_OQ))
+    #define FLV_WIDE_CMP_GT_F64(A, B) FLV_WIDE_BITS_F64(_mm256_cmp_pd((A), (B), _CMP_GT_OQ))
+    #define FLV_WIDE_CMP_GE_F64(A, B) FLV_WIDE_BITS_F64(_mm256_cmp_pd((A), (B), _CMP_GE_OQ))
+    #define FLV_WIDE_CMP_EQ_F64(A, B) FLV_WIDE_BITS_F64(_mm256_cmp_pd((A), (B), _CMP_EQ_OQ))
+    #define FLV_WIDE_CMP_NE_F64(A, B) FLV_WIDE_BITS_F64(_mm256_cmp_pd((A), (B), _CMP_NEQ_UQ))
+    #define FLV_WIDE_CMP_LT_I64(A, B) FLV_WIDE_BITS_I64(_mm256_cmpgt_epi64((B), (A)))
+    #define FLV_WIDE_CMP_LE_I64(A, B) (FLV_WIDE_BITS_I64(_mm256_cmpgt_epi64((A), (B))) ^ 0xF)
+    #define FLV_WIDE_CMP_GT_I64(A, B) FLV_WIDE_BITS_I64(_mm256_cmpgt_epi64((A), (B)))
+    #define FLV_WIDE_CMP_GE_I64(A, B) (FLV_WIDE_BITS_I64(_mm256_cmpgt_epi64((B), (A))) ^ 0xF)
+    #define FLV_WIDE_CMP_EQ_I64(A, B) FLV_WIDE_BITS_I64(_mm256_cmpeq_epi64((A), (B)))
+    #define FLV_WIDE_CMP_NE_I64(A, B) (FLV_WIDE_BITS_I64(_mm256_cmpeq_epi64((A), (B))) ^ 0xF)
+
+    // NOTE(nc): the same steps as FMod, so the value is the same one
+    INTERNAL v256d
+    FLVWideModF64(v256d A, v256d B)
+    {
+        v256d Div = _mm256_div_pd(A, B);
+        v256d Trunc = _mm256_round_pd(Div, _MM_FROUND_TRUNC);
+        v256d Result = _mm256_sub_pd(A, _mm256_mul_pd(Trunc, B));
+
+        return Result;
+    }
+
+    // NOTE(nc): a lane of the result is all ones if its bit of the low four
+    //         : bits is set
+    INTERNAL v256
+    FLVWideLaneMask(u64 Bits)
+    {
+        v256 Select = _mm256_setr_epi64x(1, 2, 4, 8);
+        v256 Result = _mm256_cmpeq_epi64(
+            _mm256_and_si256(_mm256_set1_epi64x((i64) Bits), Select),
+            Select
+        );
+
+        return Result;
+    }
+
+    // NOTE(nc): four samples of a word of a reduction. a sample that is not
+    //         : in the reduction is read as Other.
+    #define FLV_WIDE_LIVE_F64(X, Live, At, Other)                \
+        _mm256_blendv_pd(                                        \
+            (Other),                                             \
+            _mm256_loadu_pd((X) + (At)),                         \
+            _mm256_castsi256_pd(FLVWideLaneMask((Live) >> (At))) \
+        )
+
+    #define FLV_WIDE_LIVE_I64(X, Live, At, Other)           \
+        _mm256_blendv_epi8(                                 \
+            (Other),                                        \
+            _mm256_loadu_si256((v256 const*) ((X) + (At))), \
+            FLVWideLaneMask((Live) >> (At))                 \
+        )
+
+    INTERNAL v256
+    FLVWideMinI64(v256 A, v256 B)
+    {
+        v256 Result = _mm256_blendv_epi8(A, B, _mm256_cmpgt_epi64(A, B));
+
+        return Result;
+    }
+
+    INTERNAL v256
+    FLVWideMaxI64(v256 A, v256 B)
+    {
+        v256 Result = _mm256_blendv_epi8(A, B, _mm256_cmpgt_epi64(B, A));
+
+        return Result;
+    }
+
+    // NOTE(nc): a kernel writes whole words of a mask, so the bits after the
+    //         : last sample of the chunk are cleared here. the rest of the
+    //         : kernels take them to be 0.
+    INTERNAL void
+    FLVMaskTrim(u64* Mask, u64 Count)
+    {
+        u64 Words = (Count + 63) >> 6;
+        u64 TailBits = Count & 63;
+
+        if (TailBits)
+            Mask[Words - 1] &= (1ULL << TailBits) - 1;
+
+        for (u64 Word = Words; Word < FLV_CHUNK_MASK_WORDS; ++Word)
+            Mask[Word] = 0;
+    }
+
+    // NOTE(nc): the bits of one word of the filter whose samples have a
+    //         : value. A is the 64 samples of the word.
+    INTERNAL u64
+    FLVLiveWordF64(f64 const* A, u64 MaskWord)
+    {
+        u64 Valid = 0;
+
+        for (u64 Offset = 0; Offset < 64; Offset += FLV_WIDE) {
+            v256d X = _mm256_loadu_pd(A + Offset);
+
+            Valid |= FLV_WIDE_BITS_F64(_mm256_cmp_pd(X, X, _CMP_ORD_Q)) << Offset;
+        }
+
+        return MaskWord & Valid;
+    }
+
+    INTERNAL u64
+    FLVLiveWordI64(i64 const* A, u64 MaskWord)
+    {
+        v256 Hole = _mm256_set1_epi64x(FLV_I64_HOLE);
+        u64 Holes = 0;
+
+        for (u64 Offset = 0; Offset < 64; Offset += FLV_WIDE) {
+            v256 X = _mm256_loadu_si256((v256 const*) (A + Offset));
+
+            Holes |= FLV_WIDE_BITS_I64(_mm256_cmpeq_epi64(X, Hole)) << Offset;
+        }
+
+        return MaskWord & ~Holes;
+    }
+#endif
+
 #define FLV_ARITH_KERNEL_T(Name, Type, OpM)                     \
     INTERNAL                                                    \
     FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                        \
@@ -774,25 +911,101 @@ FLV_KERNEL_FUNC_SIG(FLVKernelCONVERT_I64_F64)
             Dst[Index] = OpM(A, B[Index]);                      \
     }
  
-#define FLV_ARITH_FAMILY_2(Name, OpI, OpF)                   \
-    FLV_ARITH_KERNEL_T(Name##_I64_T, i64, OpI)               \
-    FLV_ARITH_KERNEL_S(Name##_I64_S, i64, FLVScalarI64, OpI) \
-    FLV_ARITH_KERNEL_T(Name##_F64_T, f64, OpF)               \
-    FLV_ARITH_KERNEL_S(Name##_F64_S, f64, FLVScalarF64, OpF)
- 
-#define FLV_ARITH_FAMILY_3(Name, OpI, OpF)                     \
-    FLV_ARITH_KERNEL_T(Name##_I64_T, i64, OpI)                 \
-    FLV_ARITH_KERNEL_S(Name##_I64_S, i64, FLVScalarI64, OpI)   \
-    FLV_ARITH_KERNEL_RS(Name##_I64_RS, i64, FLVScalarI64, OpI) \
-    FLV_ARITH_KERNEL_T(Name##_F64_T, f64, OpF)                 \
-    FLV_ARITH_KERNEL_S(Name##_F64_S, f64, FLVScalarF64, OpF)   \
-    FLV_ARITH_KERNEL_RS(Name##_F64_RS, f64, FLVScalarF64, OpF)
- 
-FLV_ARITH_FAMILY_2(ADD, FLV_OP_ADD, FLV_OP_ADD)
-FLV_ARITH_FAMILY_3(SUB, FLV_OP_SUB, FLV_OP_SUB)
-FLV_ARITH_FAMILY_2(MUL, FLV_OP_MUL, FLV_OP_MUL)
-FLV_ARITH_FAMILY_3(DIV, FLV_OP_DIV_I64, FLV_OP_DIV_F64)
-FLV_ARITH_FAMILY_3(MOD, FLV_OP_MOD_I64, FLV_OP_MOD_F64)
+#if FLV_KERNEL_SIMD
+    // NOTE(nc): a temp has FLV_CHUNK_SAMPLES samples, so a wide kernel runs
+    //         : to the end of the last group of FLV_WIDE and has no tail. the
+    //         : samples after ChunkCount have no meaning and no kernel reads
+    //         : them as values.
+    #define FLV_ARITH_WIDE_KERNEL_T(Name, Type, Kind, OpM)                \
+        INTERNAL                                                          \
+        FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                              \
+        {                                                                 \
+            FLV_ARITH_HEAD(Type);                                         \
+            Type const* A = (Type const*) FLVTempPtr(Lane, Op.LHS);       \
+            Type const* B = (Type const*) FLVTempPtr(Lane, Op.RHS);       \
+                                                                          \
+            for (u64 Index = 0; Index < Count; Index += FLV_WIDE) {       \
+                FLV_WIDE_TYPE_##Kind X = FLV_WIDE_LOAD_##Kind(A + Index); \
+                FLV_WIDE_TYPE_##Kind Y = FLV_WIDE_LOAD_##Kind(B + Index); \
+                                                                          \
+                FLV_WIDE_STORE_##Kind(Dst + Index, OpM(X, Y));            \
+            }                                                             \
+        }
+    
+    #define FLV_ARITH_WIDE_KERNEL_S(Name, Type, Kind, ScalarFunc, OpM)    \
+        INTERNAL                                                          \
+        FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                              \
+        {                                                                 \
+            FLV_ARITH_HEAD(Type);                                         \
+            Type const* A = (Type const*) FLVTempPtr(Lane, Op.LHS);       \
+            FLV_WIDE_TYPE_##Kind Y = FLV_WIDE_SET_##Kind(                 \
+                ScalarFunc(Lane, Op.RHS)                                  \
+            );                                                            \
+                                                                          \
+            for (u64 Index = 0; Index < Count; Index += FLV_WIDE) {       \
+                FLV_WIDE_TYPE_##Kind X = FLV_WIDE_LOAD_##Kind(A + Index); \
+                                                                          \
+                FLV_WIDE_STORE_##Kind(Dst + Index, OpM(X, Y));            \
+            }                                                             \
+        }
+    
+    #define FLV_ARITH_WIDE_KERNEL_RS(Name, Type, Kind, ScalarFunc, OpM)   \
+        INTERNAL                                                          \
+        FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                              \
+        {                                                                 \
+            FLV_ARITH_HEAD(Type);                                         \
+            FLV_WIDE_TYPE_##Kind X = FLV_WIDE_SET_##Kind(                 \
+                ScalarFunc(Lane, Op.LHS)                                  \
+            );                                                            \
+            Type const* B = (Type const*) FLVTempPtr(Lane, Op.RHS);       \
+                                                                          \
+            for (u64 Index = 0; Index < Count; Index += FLV_WIDE) {       \
+                FLV_WIDE_TYPE_##Kind Y = FLV_WIDE_LOAD_##Kind(B + Index); \
+                                                                          \
+                FLV_WIDE_STORE_##Kind(Dst + Index, OpM(X, Y));            \
+            }                                                             \
+        }
+    
+    #define FLV_ARITH_WIDE_FAMILY_2(Name, Type, Kind, ScalarFunc, OpM) \
+        FLV_ARITH_WIDE_KERNEL_T(Name##_T, Type, Kind, OpM)             \
+        FLV_ARITH_WIDE_KERNEL_S(Name##_S, Type, Kind, ScalarFunc, OpM)
+    
+    #define FLV_ARITH_WIDE_FAMILY_3(Name, Type, Kind, ScalarFunc, OpM) \
+        FLV_ARITH_WIDE_KERNEL_T(Name##_T, Type, Kind, OpM)             \
+        FLV_ARITH_WIDE_KERNEL_S(Name##_S, Type, Kind, ScalarFunc, OpM) \
+        FLV_ARITH_WIDE_KERNEL_RS(Name##_RS, Type, Kind, ScalarFunc, OpM)
+    
+    FLV_ARITH_WIDE_FAMILY_2(ADD_I64, i64, I64, FLVScalarI64, FLV_WIDE_ADD_I64)
+    FLV_ARITH_WIDE_FAMILY_2(ADD_F64, f64, F64, FLVScalarF64, FLV_WIDE_ADD_F64)
+    FLV_ARITH_WIDE_FAMILY_3(SUB_I64, i64, I64, FLVScalarI64, FLV_WIDE_SUB_I64)
+    FLV_ARITH_WIDE_FAMILY_3(SUB_F64, f64, F64, FLVScalarF64, FLV_WIDE_SUB_F64)
+    FLV_ARITH_WIDE_FAMILY_2(MUL_F64, f64, F64, FLVScalarF64, FLV_WIDE_MUL_F64)
+    FLV_ARITH_WIDE_FAMILY_3(DIV_F64, f64, F64, FLVScalarF64, FLV_WIDE_DIV_F64)
+    FLV_ARITH_WIDE_FAMILY_3(MOD_F64, f64, F64, FLVScalarF64, FLV_WIDE_MOD_F64)
+    
+    // NOTE(nc): AVX2 has no multiply and no divide of i64, so these are the
+    //         : scalar kernels
+    FLV_ARITH_KERNEL_T(MUL_I64_T, i64, FLV_OP_MUL)
+    FLV_ARITH_KERNEL_S(MUL_I64_S, i64, FLVScalarI64, FLV_OP_MUL)
+    FLV_ARITH_KERNEL_T(DIV_I64_T, i64, FLV_OP_DIV_I64)
+    FLV_ARITH_KERNEL_S(DIV_I64_S, i64, FLVScalarI64, FLV_OP_DIV_I64)
+    FLV_ARITH_KERNEL_RS(DIV_I64_RS, i64, FLVScalarI64, FLV_OP_DIV_I64)
+    FLV_ARITH_KERNEL_T(MOD_I64_T, i64, FLV_OP_MOD_I64)
+    FLV_ARITH_KERNEL_S(MOD_I64_S, i64, FLVScalarI64, FLV_OP_MOD_I64)
+    FLV_ARITH_KERNEL_RS(MOD_I64_RS, i64, FLVScalarI64, FLV_OP_MOD_I64)
+    
+    #undef FLV_ARITH_WIDE_FAMILY_3
+    #undef FLV_ARITH_WIDE_FAMILY_2
+    #undef FLV_ARITH_WIDE_KERNEL_RS
+    #undef FLV_ARITH_WIDE_KERNEL_S
+    #undef FLV_ARITH_WIDE_KERNEL_T
+#else
+    FLV_ARITH_FAMILY_2(ADD, FLV_OP_ADD, FLV_OP_ADD)
+    FLV_ARITH_FAMILY_3(SUB, FLV_OP_SUB, FLV_OP_SUB)
+    FLV_ARITH_FAMILY_2(MUL, FLV_OP_MUL, FLV_OP_MUL)
+    FLV_ARITH_FAMILY_3(DIV, FLV_OP_DIV_I64, FLV_OP_DIV_F64)
+    FLV_ARITH_FAMILY_3(MOD, FLV_OP_MOD_I64, FLV_OP_MOD_F64)
+#endif
  
 #undef FLV_ARITH_FAMILY_3
 #undef FLV_ARITH_FAMILY_2
@@ -818,11 +1031,66 @@ FLV_ARITH_FAMILY_3(MOD, FLV_OP_MOD_I64, FLV_OP_MOD_F64)
             Dst[Index] = (Expr);                                      \
     }
  
-FLV_UNARY_KERNEL(NEG_I64, i64, i64, -A[Index])
-FLV_UNARY_KERNEL(NEG_F64, f64, f64, -A[Index])
-FLV_UNARY_KERNEL(ABS_I64, i64, i64, (A[Index] < 0) ? -A[Index] : A[Index])
-FLV_UNARY_KERNEL(ABS_F64, f64, f64, (A[Index] < 0.0) ? -A[Index] : A[Index])
-FLV_UNARY_KERNEL(SQRT_F64, f64, f64, SqrtF64(A[Index]))
+#if FLV_KERNEL_SIMD
+    #define FLV_UNARY_WIDE_KERNEL(Name, Type, Kind, Expr)                      \
+        INTERNAL                                                               \
+        FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                                   \
+        {                                                                      \
+            if (FLVTempIsMissing(Lane, Op.LHS)) {                              \
+                FLVTempSetMissing(Lane, Op.Dst);                               \
+                                                                               \
+                return;                                                        \
+            }                                                                  \
+                                                                               \
+            Type const* A = (Type const*) FLVTempPtr(Lane, Op.LHS);            \
+            Type* Dst = (Type*) FLVTempPtr(Lane, Op.Dst);                      \
+                                                                               \
+            for (u64 Index = 0; Index < Lane->ChunkCount; Index += FLV_WIDE) { \
+                FLV_WIDE_TYPE_##Kind X = FLV_WIDE_LOAD_##Kind(A + Index);      \
+                                                                               \
+                FLV_WIDE_STORE_##Kind(Dst + Index, (Expr));                    \
+            }                                                                  \
+        }
+    
+    // NOTE(nc): an abs is a blend on X < 0, as the scalar one is, so a -0.0
+    //         : and a NaN come out with the sign they went in with
+    FLV_UNARY_WIDE_KERNEL(
+        NEG_I64, i64, I64,
+        _mm256_sub_epi64(_mm256_setzero_si256(), X)
+    )
+    FLV_UNARY_WIDE_KERNEL(
+        NEG_F64, f64, F64,
+        _mm256_xor_pd(X, _mm256_set1_pd(-0.0))
+    )
+    FLV_UNARY_WIDE_KERNEL(
+        ABS_I64, i64, I64,
+        _mm256_blendv_epi8(
+            X,
+            _mm256_sub_epi64(_mm256_setzero_si256(), X),
+            _mm256_cmpgt_epi64(_mm256_setzero_si256(), X)
+        )
+    )
+    FLV_UNARY_WIDE_KERNEL(
+        ABS_F64, f64, F64,
+        _mm256_blendv_pd(
+            X,
+            _mm256_xor_pd(X, _mm256_set1_pd(-0.0)),
+            _mm256_cmp_pd(X, _mm256_setzero_pd(), _CMP_LT_OQ)
+        )
+    )
+    FLV_UNARY_WIDE_KERNEL(
+        SQRT_F64, f64, F64,
+        _mm256_sqrt_pd(X)
+    )
+    
+    #undef FLV_UNARY_WIDE_KERNEL
+#else
+    FLV_UNARY_KERNEL(NEG_I64, i64, i64, -A[Index])
+    FLV_UNARY_KERNEL(NEG_F64, f64, f64, -A[Index])
+    FLV_UNARY_KERNEL(ABS_I64, i64, i64, (A[Index] < 0) ? -A[Index] : A[Index])
+    FLV_UNARY_KERNEL(ABS_F64, f64, f64, (A[Index] < 0.0) ? -A[Index] : A[Index])
+    FLV_UNARY_KERNEL(SQRT_F64, f64, f64, SqrtF64(A[Index]))
+#endif
  
 #undef FLV_UNARY_KERNEL
 #undef FLV_OP_MOD_F64
@@ -879,12 +1147,99 @@ FLV_UNARY_KERNEL(SQRT_F64, f64, f64, SqrtF64(A[Index]))
     FLV_CMP_KERNEL_T(Cmp##_F64_T, f64, OpSym)               \
     FLV_CMP_KERNEL_S(Cmp##_F64_S, f64, OpSym, FLVScalarF64)
 
-FLV_CMP_FAMILY(CMP_LT, <)
-FLV_CMP_FAMILY(CMP_LE, <=)
-FLV_CMP_FAMILY(CMP_GT, >)
-FLV_CMP_FAMILY(CMP_GE, >=)
-FLV_CMP_FAMILY(CMP_EQ, ==)
-FLV_CMP_FAMILY(CMP_NE, !=)
+#if FLV_KERNEL_SIMD
+    // NOTE(nc): a compare of four samples is four bits, and 16 of them are a
+    //         : word of the mask
+    #define FLV_CMP_WIDE_KERNEL_T(Name, Type, Kind, CmpM)                           \
+        INTERNAL                                                                    \
+        FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                                        \
+        {                                                                           \
+            if (FLVTempIsMissing(Lane, Op.LHS) || FLVTempIsMissing(Lane, Op.RHS)) { \
+                FLVTempSetMissing(Lane, Op.Dst);                                    \
+                                                                                    \
+                return;                                                             \
+            }                                                                       \
+                                                                                    \
+            Type const* A = (Type const*) FLVTempPtr(Lane, Op.LHS);                 \
+            Type const* B = (Type const*) FLVTempPtr(Lane, Op.RHS);                 \
+            u64* Mask = (u64*) FLVTempPtr(Lane, Op.Dst);                            \
+            u64 Words = (Lane->ChunkCount + 63) >> 6;                               \
+                                                                                    \
+            for (u64 Word = 0; Word < Words; ++Word) {                              \
+                Type const* WordA = A + (Word << 6);                                \
+                Type const* WordB = B + (Word << 6);                                \
+                u64 Bits = 0;                                                       \
+                                                                                    \
+                for (u64 Offset = 0; Offset < 64; Offset += FLV_WIDE) {             \
+                    FLV_WIDE_TYPE_##Kind X = FLV_WIDE_LOAD_##Kind(WordA + Offset);  \
+                    FLV_WIDE_TYPE_##Kind Y = FLV_WIDE_LOAD_##Kind(WordB + Offset);  \
+                                                                                    \
+                    Bits |= CmpM(X, Y) << Offset;                                   \
+                }                                                                   \
+                                                                                    \
+                Mask[Word] = Bits;                                                  \
+            }                                                                       \
+                                                                                    \
+            FLVMaskTrim(Mask, Lane->ChunkCount);                                    \
+        }
+    
+    #define FLV_CMP_WIDE_KERNEL_S(Name, Type, Kind, CmpM, ScalarFunc)               \
+        INTERNAL                                                                    \
+        FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                                        \
+        {                                                                           \
+            if (FLVTempIsMissing(Lane, Op.LHS) || FLVTempIsMissing(Lane, Op.RHS)) { \
+                FLVTempSetMissing(Lane, Op.Dst);                                    \
+                                                                                    \
+                return;                                                             \
+            }                                                                       \
+                                                                                    \
+            Type const* A = (Type const*) FLVTempPtr(Lane, Op.LHS);                 \
+            FLV_WIDE_TYPE_##Kind Y = FLV_WIDE_SET_##Kind(                           \
+                ScalarFunc(Lane, Op.RHS)                                            \
+            );                                                                      \
+            u64* Mask = (u64*) FLVTempPtr(Lane, Op.Dst);                            \
+            u64 Words = (Lane->ChunkCount + 63) >> 6;                               \
+                                                                                    \
+            for (u64 Word = 0; Word < Words; ++Word) {                              \
+                Type const* WordA = A + (Word << 6);                                \
+                u64 Bits = 0;                                                       \
+                                                                                    \
+                for (u64 Offset = 0; Offset < 64; Offset += FLV_WIDE) {             \
+                    FLV_WIDE_TYPE_##Kind X = FLV_WIDE_LOAD_##Kind(WordA + Offset);  \
+                                                                                    \
+                    Bits |= CmpM(X, Y) << Offset;                                   \
+                }                                                                   \
+                                                                                    \
+                Mask[Word] = Bits;                                                  \
+            }                                                                       \
+                                                                                    \
+            FLVMaskTrim(Mask, Lane->ChunkCount);                                    \
+        }
+    
+    #define FLV_CMP_WIDE_FAMILY(Cmp)                                                     \
+        FLV_CMP_WIDE_KERNEL_T(Cmp##_I64_T, i64, I64, FLV_WIDE_##Cmp##_I64)               \
+        FLV_CMP_WIDE_KERNEL_S(Cmp##_I64_S, i64, I64, FLV_WIDE_##Cmp##_I64, FLVScalarI64) \
+        FLV_CMP_WIDE_KERNEL_T(Cmp##_F64_T, f64, F64, FLV_WIDE_##Cmp##_F64)               \
+        FLV_CMP_WIDE_KERNEL_S(Cmp##_F64_S, f64, F64, FLV_WIDE_##Cmp##_F64, FLVScalarF64)
+    
+    FLV_CMP_WIDE_FAMILY(CMP_LT)
+    FLV_CMP_WIDE_FAMILY(CMP_LE)
+    FLV_CMP_WIDE_FAMILY(CMP_GT)
+    FLV_CMP_WIDE_FAMILY(CMP_GE)
+    FLV_CMP_WIDE_FAMILY(CMP_EQ)
+    FLV_CMP_WIDE_FAMILY(CMP_NE)
+    
+    #undef FLV_CMP_WIDE_FAMILY
+    #undef FLV_CMP_WIDE_KERNEL_S
+    #undef FLV_CMP_WIDE_KERNEL_T
+#else
+    FLV_CMP_FAMILY(CMP_LT, <)
+    FLV_CMP_FAMILY(CMP_LE, <=)
+    FLV_CMP_FAMILY(CMP_GT, >)
+    FLV_CMP_FAMILY(CMP_GE, >=)
+    FLV_CMP_FAMILY(CMP_EQ, ==)
+    FLV_CMP_FAMILY(CMP_NE, !=)
+#endif
 
 #undef FLV_CMP_FAMILY
 #undef FLV_CMP_KERNEL_S
@@ -1096,22 +1451,190 @@ FLV_KERNEL_FUNC_SIG(FLVKernelSTR_HAS)
 #define FLV_BODY_MIN(Field) R->Minimum.Field = (Bit && X < R->Minimum.Field) ? X : R->Minimum.Field
 #define FLV_BODY_MAX(Field) R->Maximum.Field = (Bit && X > R->Maximum.Field) ? X : R->Maximum.Field
 
-FLV_REDUCE_KERNEL(MEAN_I64,     i64, I64, FLV_VALID_I64, FLV_BODY_MEAN)
-FLV_REDUCE_KERNEL(MEAN_F64,     f64, F64, FLV_VALID_F64, FLV_BODY_MEAN)
-FLV_REDUCE_KERNEL(STDDEV_I64,   i64, I64, FLV_VALID_I64, FLV_BODY_STDDEV)
-FLV_REDUCE_KERNEL(STDDEV_F64,   f64, F64, FLV_VALID_F64, FLV_BODY_STDDEV)
-FLV_REDUCE_KERNEL(MIN_I64,      i64, I64, FLV_VALID_I64, FLV_BODY_MIN(I64))
-FLV_REDUCE_KERNEL(MIN_F64,      f64, F64, FLV_VALID_F64, FLV_BODY_MIN(F64))
-FLV_REDUCE_KERNEL(MAX_I64,      i64, I64, FLV_VALID_I64, FLV_BODY_MAX(I64))
-FLV_REDUCE_KERNEL(MAX_F64,      f64, F64, FLV_VALID_F64, FLV_BODY_MAX(F64))
-FLV_REDUCE_KERNEL(SUM_I64,      i64, I64, FLV_VALID_I64, FLV_BODY_SUM(I64, 0))
-FLV_REDUCE_KERNEL(SUM_F64,      f64, F64, FLV_VALID_F64, FLV_BODY_SUM(F64, 0.0))
-FLV_REDUCE_KERNEL(FIRST_I64,    i64, I64, FLV_VALID_I64, FLV_BODY_NONE)
-FLV_REDUCE_KERNEL(FIRST_F64,    f64, F64, FLV_VALID_F64, FLV_BODY_NONE)
-FLV_REDUCE_KERNEL(LAST_I64,     i64, I64, FLV_VALID_I64, FLV_BODY_NONE)
-FLV_REDUCE_KERNEL(LAST_F64,     f64, F64, FLV_VALID_F64, FLV_BODY_NONE)
-FLV_REDUCE_KERNEL(REDUCE_COUNT, i64, I64, FLV_VALID_I64, FLV_BODY_NONE)
-FLV_REDUCE_KERNEL(REDUCE_COUNT_F64, f64, F64, FLV_VALID_F64, FLV_BODY_NONE)
+#if FLV_KERNEL_SIMD
+    // NOTE(nc): a reduction goes a word of the filter at a time. the samples
+    //         : of the word that are in the reduction are its Live bits, so
+    //         : the first, the last and the count of them are three bit
+    //         : operations, and a word with no bit is skipped. the first
+    //         : sample of the reduction is the first that is in it, as in
+    //         : the scalar kernel.
+    #define FLV_REDUCE_WIDE_KERNEL(Name, Type, Field, Kind, Body)            \
+        INTERNAL                                                             \
+        FLV_KERNEL_FUNC_SIG(FLVKernel##Name)                                 \
+        {                                                                    \
+            FLVReduction* R = &Lane->Reductions[FLVGetOperandIndex(Op.Dst)]; \
+                                                                             \
+            if (FLVTempIsMissing(Lane, Op.LHS)) {                            \
+                FLVTempSetMissing(Lane, Op.Dst);                             \
+                                                                             \
+                return;                                                      \
+            }                                                                \
+                                                                             \
+            u64 const* Mask = Lane->Mask ? Lane->Mask : Lane->MaskAll;       \
+            Type const* A = (Type const*) FLVTempPtr(Lane, Op.LHS);          \
+            u64 Words = (Lane->ChunkCount + 63) >> 6;                        \
+            u64 TailBits = Lane->ChunkCount & 63;                            \
+                                                                             \
+            for (u64 Word = 0; Word < Words; ++Word) {                       \
+                Type const* X = A + (Word << 6);                             \
+                u64 Live = Mask[Word];                                       \
+                                                                             \
+                if (TailBits && Word == Words - 1)                           \
+                    Live &= (1ULL << TailBits) - 1;                          \
+                                                                             \
+                if (Live)                                                    \
+                    Live = FLVLiveWord##Kind(X, Live);                       \
+                                                                             \
+                if (!Live)                                                   \
+                    continue;                                                \
+                                                                             \
+                if (!R->Count) {                                             \
+                    Type Head = X[Ctz64(Live)];                              \
+                                                                             \
+                    R->Head.Field = Head;                                    \
+                    R->Minimum.Field = Head;                                 \
+                    R->Maximum.Field = Head;                                 \
+                    R->Shift = (f64) Head;                                   \
+                }                                                            \
+                                                                             \
+                Body;                                                        \
+                R->Tail.Field = X[63 - Clz64(Live)];                         \
+                R->Count += PopCount64(Live);                                \
+            }                                                                \
+        }
+    
+    #define FLV_BODY_WIDE_NONE
+    
+    // NOTE(nc): the samples of a word that are not in the reduction are
+    //         : read as the extreme so far, which changes nothing. four
+    //         : groups are put together before the extreme takes them, so
+    //         : one word is four steps of the chain and not 16.
+    #define FLV_BODY_WIDE_EXTREME(Kind, Type, Field, WideM, ScalarM)    \
+        FLV_WIDE_TYPE_##Kind Seed = FLV_WIDE_SET_##Kind(R->Field.Kind); \
+        FLV_WIDE_TYPE_##Kind Wide = Seed;                               \
+        Type Lanes[FLV_WIDE];                                           \
+                                                                        \
+        for (u64 Offset = 0; Offset < 64; Offset += 4 * FLV_WIDE) {     \
+            FLV_WIDE_TYPE_##Kind V0 = FLV_WIDE_LIVE_##Kind(             \
+                X, Live, Offset, Seed                                   \
+            );                                                          \
+            FLV_WIDE_TYPE_##Kind V1 = FLV_WIDE_LIVE_##Kind(             \
+                X, Live, Offset + FLV_WIDE, Seed                        \
+            );                                                          \
+            FLV_WIDE_TYPE_##Kind V2 = FLV_WIDE_LIVE_##Kind(             \
+                X, Live, Offset + 2 * FLV_WIDE, Seed                    \
+            );                                                          \
+            FLV_WIDE_TYPE_##Kind V3 = FLV_WIDE_LIVE_##Kind(             \
+                X, Live, Offset + 3 * FLV_WIDE, Seed                    \
+            );                                                          \
+                                                                        \
+            Wide = WideM(Wide, WideM(WideM(V0, V1), WideM(V2, V3)));    \
+        }                                                               \
+                                                                        \
+        FLV_WIDE_STORE_##Kind(Lanes, Wide);                             \
+        R->Field.Kind = ScalarM(                                        \
+            ScalarM(Lanes[0], Lanes[1]),                                \
+            ScalarM(Lanes[2], Lanes[3])                                 \
+        )
+    
+    #define FLV_BODY_WIDE_MIN_F64 FLV_BODY_WIDE_EXTREME(F64, f64, Minimum, _mm256_min_pd, MIN)
+    #define FLV_BODY_WIDE_MAX_F64 FLV_BODY_WIDE_EXTREME(F64, f64, Maximum, _mm256_max_pd, MAX)
+    #define FLV_BODY_WIDE_MIN_I64 FLV_BODY_WIDE_EXTREME(I64, i64, Minimum, FLVWideMinI64, MIN)
+    #define FLV_BODY_WIDE_MAX_I64 FLV_BODY_WIDE_EXTREME(I64, i64, Maximum, FLVWideMaxI64, MAX)
+    
+    #define FLV_BODY_WIDE_SUM_I64                               \
+        v256 Zero = _mm256_setzero_si256();                     \
+        v256 Wide = Zero;                                       \
+        i64 Lanes[FLV_WIDE];                                    \
+                                                                \
+        for (u64 Offset = 0; Offset < 64; Offset += FLV_WIDE) { \
+            Wide = _mm256_add_epi64(                            \
+                Wide,                                           \
+                FLV_WIDE_LIVE_I64(X, Live, Offset, Zero)        \
+            );                                                  \
+        }                                                       \
+                                                                \
+        _mm256_storeu_si256((v256*) Lanes, Wide);               \
+        R->Summation.I64 += Lanes[0] + Lanes[1] + Lanes[2] + Lanes[3]
+    
+    // NOTE(nc): a sum of f64 is not wide: four sums at a time add the
+    //         : samples in another order, and the last digits of a mean, a
+    //         : sum and a stddev would not be the ones of the scalar build
+    FLV_REDUCE_KERNEL(MEAN_I64,     i64, I64, FLV_VALID_I64, FLV_BODY_MEAN)
+    FLV_REDUCE_KERNEL(MEAN_F64,     f64, F64, FLV_VALID_F64, FLV_BODY_MEAN)
+    FLV_REDUCE_KERNEL(STDDEV_I64,   i64, I64, FLV_VALID_I64, FLV_BODY_STDDEV)
+    FLV_REDUCE_KERNEL(STDDEV_F64,   f64, F64, FLV_VALID_F64, FLV_BODY_STDDEV)
+    FLV_REDUCE_KERNEL(SUM_F64,      f64, F64, FLV_VALID_F64, FLV_BODY_SUM(F64, 0.0))
+    FLV_REDUCE_WIDE_KERNEL(MIN_I64,          i64, I64, I64, FLV_BODY_WIDE_MIN_I64)
+    FLV_REDUCE_WIDE_KERNEL(MIN_F64,          f64, F64, F64, FLV_BODY_WIDE_MIN_F64)
+    FLV_REDUCE_WIDE_KERNEL(MAX_I64,          i64, I64, I64, FLV_BODY_WIDE_MAX_I64)
+    FLV_REDUCE_WIDE_KERNEL(MAX_F64,          f64, F64, F64, FLV_BODY_WIDE_MAX_F64)
+    FLV_REDUCE_WIDE_KERNEL(SUM_I64,          i64, I64, I64, FLV_BODY_WIDE_SUM_I64)
+    FLV_REDUCE_WIDE_KERNEL(FIRST_I64,        i64, I64, I64, FLV_BODY_WIDE_NONE)
+    FLV_REDUCE_WIDE_KERNEL(FIRST_F64,        f64, F64, F64, FLV_BODY_WIDE_NONE)
+    FLV_REDUCE_WIDE_KERNEL(LAST_I64,         i64, I64, I64, FLV_BODY_WIDE_NONE)
+    FLV_REDUCE_WIDE_KERNEL(LAST_F64,         f64, F64, F64, FLV_BODY_WIDE_NONE)
+    FLV_REDUCE_WIDE_KERNEL(REDUCE_COUNT,     i64, I64, I64, FLV_BODY_WIDE_NONE)
+    FLV_REDUCE_WIDE_KERNEL(REDUCE_COUNT_F64, f64, F64, F64, FLV_BODY_WIDE_NONE)
+    
+    #undef FLV_BODY_WIDE_SUM_I64
+    #undef FLV_BODY_WIDE_MAX_I64
+    #undef FLV_BODY_WIDE_MIN_I64
+    #undef FLV_BODY_WIDE_MAX_F64
+    #undef FLV_BODY_WIDE_MIN_F64
+    #undef FLV_BODY_WIDE_EXTREME
+    #undef FLV_BODY_WIDE_NONE
+    #undef FLV_REDUCE_WIDE_KERNEL
+    
+    #undef FLV_WIDE_LIVE_I64
+    #undef FLV_WIDE_LIVE_F64
+    #undef FLV_WIDE_CMP_NE_I64
+    #undef FLV_WIDE_CMP_EQ_I64
+    #undef FLV_WIDE_CMP_GE_I64
+    #undef FLV_WIDE_CMP_GT_I64
+    #undef FLV_WIDE_CMP_LE_I64
+    #undef FLV_WIDE_CMP_LT_I64
+    #undef FLV_WIDE_CMP_NE_F64
+    #undef FLV_WIDE_CMP_EQ_F64
+    #undef FLV_WIDE_CMP_GE_F64
+    #undef FLV_WIDE_CMP_GT_F64
+    #undef FLV_WIDE_CMP_LE_F64
+    #undef FLV_WIDE_CMP_LT_F64
+    #undef FLV_WIDE_SUB_I64
+    #undef FLV_WIDE_ADD_I64
+    #undef FLV_WIDE_MOD_F64
+    #undef FLV_WIDE_DIV_F64
+    #undef FLV_WIDE_MUL_F64
+    #undef FLV_WIDE_SUB_F64
+    #undef FLV_WIDE_ADD_F64
+    #undef FLV_WIDE_BITS_I64
+    #undef FLV_WIDE_BITS_F64
+    #undef FLV_WIDE_SET_I64
+    #undef FLV_WIDE_SET_F64
+    #undef FLV_WIDE_STORE_I64
+    #undef FLV_WIDE_STORE_F64
+    #undef FLV_WIDE_LOAD_I64
+    #undef FLV_WIDE_LOAD_F64
+    #undef FLV_WIDE_TYPE_I64
+    #undef FLV_WIDE_TYPE_F64
+#else
+    FLV_REDUCE_KERNEL(MEAN_I64,     i64, I64, FLV_VALID_I64, FLV_BODY_MEAN)
+    FLV_REDUCE_KERNEL(MEAN_F64,     f64, F64, FLV_VALID_F64, FLV_BODY_MEAN)
+    FLV_REDUCE_KERNEL(STDDEV_I64,   i64, I64, FLV_VALID_I64, FLV_BODY_STDDEV)
+    FLV_REDUCE_KERNEL(STDDEV_F64,   f64, F64, FLV_VALID_F64, FLV_BODY_STDDEV)
+    FLV_REDUCE_KERNEL(MIN_I64,      i64, I64, FLV_VALID_I64, FLV_BODY_MIN(I64))
+    FLV_REDUCE_KERNEL(MIN_F64,      f64, F64, FLV_VALID_F64, FLV_BODY_MIN(F64))
+    FLV_REDUCE_KERNEL(MAX_I64,      i64, I64, FLV_VALID_I64, FLV_BODY_MAX(I64))
+    FLV_REDUCE_KERNEL(MAX_F64,      f64, F64, FLV_VALID_F64, FLV_BODY_MAX(F64))
+    FLV_REDUCE_KERNEL(SUM_I64,      i64, I64, FLV_VALID_I64, FLV_BODY_SUM(I64, 0))
+    FLV_REDUCE_KERNEL(SUM_F64,      f64, F64, FLV_VALID_F64, FLV_BODY_SUM(F64, 0.0))
+    FLV_REDUCE_KERNEL(FIRST_I64,    i64, I64, FLV_VALID_I64, FLV_BODY_NONE)
+    FLV_REDUCE_KERNEL(FIRST_F64,    f64, F64, FLV_VALID_F64, FLV_BODY_NONE)
+    FLV_REDUCE_KERNEL(LAST_I64,     i64, I64, FLV_VALID_I64, FLV_BODY_NONE)
+    FLV_REDUCE_KERNEL(LAST_F64,     f64, F64, FLV_VALID_F64, FLV_BODY_NONE)
+    FLV_REDUCE_KERNEL(REDUCE_COUNT, i64, I64, FLV_VALID_I64, FLV_BODY_NONE)
+    FLV_REDUCE_KERNEL(REDUCE_COUNT_F64, f64, F64, FLV_VALID_F64, FLV_BODY_NONE)
+#endif
 
 #undef FLV_BODY_MAX
 #undef FLV_BODY_MIN

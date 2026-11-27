@@ -21,9 +21,12 @@ struct FLAPRasterFont;
 #define CLI_GRAPH_SIZE_MIN       256
 #define CLI_GRAPH_SIZE_MAX     16384
 #define CLI_GRAPH_FONT_SIZE       12.0f
+#define CLI_TAB_WIDTH           1920
+#define CLI_TAB_HEIGHT          1080
 
 #define CLI_GRAPH_ROW_HEIGHT (2.0f * CLI_GRAPH_FONT_SIZE)
 #define CLI_GRAPH_GRID_ALPHA 0.15f
+#define CLI_TAB_ROW_ALPHA    0.15f
 
 // @types______________________________________________________________________
 struct CLIThreadParams {
@@ -55,6 +58,8 @@ struct CLIScript {
     CLIScript*    Next;
     FLVUnit*      Unit;
     Str8          Path;
+    Str8*         ProgramNames;
+    Str8**        DirectiveNames;
     WallClockTime Time;
     WallClockTime SourceTime;
 };
@@ -90,6 +95,7 @@ struct CLIShared {
     u64             FailCount;
     u64             ConvertedCount;
     v2i32           GraphSize;
+    v2i32           TabSize;
     b32             IsRecursive;
     b32             IsForced;
     b32             IsDryRun;

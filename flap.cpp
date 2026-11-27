@@ -663,8 +663,32 @@ AppViewUI(r2f32 Rect)
                                         );
                                         Str8 CmdName = Cmd->Head->String;
                                         EVRow* Row = NULL;
+                                        // NOTE(nc): no row is selected and the input is a
+                                        //         : folder, for a command that takes one. so
+                                        //         : the folder is the answer, and not the
+                                        //         : first file in it.
+                                        b32 IsFolderAccept = (
+                                            !SelectionTable.Min.Y &&
+                                            !SelectionTable.Max.Y &&
+                                            CmdName.Size &&
+                                            (
+                                                AppCommandKindInfoFromStr(CmdName)->Query.Kind &
+                                                APP_QUERY_KIND_ALLOW_FOLDERS
+                                            ) &&
+                                            Filter.Size &&
+                                            (
+                                                Filter.Str[Filter.Size - 1] == '/' ||
+                                                Filter.Str[Filter.Size - 1] == '\\'
+                                            )
+                                        );
 
-                                        if (
+                                        if (IsFolderAccept) {
+                                            Taken = TRUE;
+                                            AppCmd(
+                                                APP_COMMAND_KIND_COMPLETE_QUERY,
+                                                __Registers.FilePath = Filter
+                                            );
+                                        } else if (
                                             !SelectionTable.Min.Y &&
                                             !SelectionTable.Max.Y
                                         ) {
@@ -683,7 +707,7 @@ AppViewUI(r2f32 Rect)
                                             );
                                         }
 
-                                        if (Row->Eval.Expr != EMPTY_EVAL_EXPR_VALUE) {
+                                        if (Row && Row->Eval.Expr != EMPTY_EVAL_EXPR_VALUE) {
                                             Taken = TRUE;
 
                                             EvalEval Eval = Row->Eval;

@@ -184,6 +184,23 @@ FLAPExportPath(
     return Result;
 }
 
+// NOTE(nc): <folder of the FLV>/<name of the FLV>_<timestamp>.png
+INTERNAL Str8
+FLAPTabExportPath(Arena* MemPool)
+{
+    Str8 Path = AppViewFilePath();
+    Str8 Result = ArenaPushStrFmt(
+        MemPool,
+        "%S/%S_%llu.%S",
+        PRINT_STR(StrChopLastSlash(Path)),
+        PRINT_STR(StrChopLastDot(StrSkipLastSlash(Path))),
+        TimeGetTimestamp(),
+        PRINT_STR(FLAP_EXPORT_KIND_EXTENSION_TABLE[FLAP_EXPORT_KIND_PNG])
+    );
+
+    return Result;
+}
+
 INTERNAL b32
 FLAPToolButton(
     AppIconKind Icon,
@@ -347,10 +364,11 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                                 : FLAP_GRAPH_CAPTURE_KIND_CLIPBOARD;
                         }
                     } else if (IsTable) {
+                        b32 HasTips = !State->Graph.CaptureKind;
                         b32 CSVClicked = FLAPToolButton(
                             APP_ICON_KIND_GRID,
                             "###export_csv"_s8,
-                            "Export table as CSV"_s8,
+                            HasTips ? "Export table as CSV"_s8 : ""_s8,
                             APP_COMMAND_KIND_INFO_TABLE[
                                 APP_COMMAND_KIND_EXPORT_TABLE_CSV
                             ].String
@@ -358,7 +376,7 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                         b32 TXTClicked = FLAPToolButton(
                             APP_ICON_KIND_LIST,
                             "###export_txt"_s8,
-                            "Export table as text"_s8,
+                            HasTips ? "Export table as text"_s8 : ""_s8,
                             APP_COMMAND_KIND_INFO_TABLE[
                                 APP_COMMAND_KIND_EXPORT_TABLE_TXT
                             ].String
@@ -819,7 +837,10 @@ FLAPGraphCaptureExport(
 
     if (Graph->CaptureKind == FLAP_GRAPH_CAPTURE_KIND_CLIPBOARD) {
         SetClipboardImage(Capture->Size, Capture->Pixels);
-    } else if (Graph->HotKey < Ctx->Unit->Lowered.LayoutCount) {
+    } else if (
+        Graph->IsTabCapture ||
+        Graph->HotKey < Ctx->Unit->Lowered.LayoutCount
+    ) {
         FLAPExportSource Source = {};
 
         Source.Pixels = Capture->Pixels;
@@ -827,12 +848,14 @@ FLAPGraphCaptureExport(
         FLAPExport(
             FLAP_EXPORT_KIND_PNG,
             &Source,
-            FLAPExportPath(
-                MemPool,
-                Ctx,
-                Graph->HotKey,
-                FLAP_EXPORT_KIND_PNG
-            )
+            Graph->IsTabCapture
+                ? FLAPTabExportPath(MemPool)
+                : FLAPExportPath(
+                    MemPool,
+                    Ctx,
+                    Graph->HotKey,
+                    FLAP_EXPORT_KIND_PNG
+                )
         );
     }
 }
@@ -1120,6 +1143,7 @@ APP_VIEW_UI_FUNC_DEF(FLVView)
 
                 State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_NULL;
                 State->Graph.IsCaptureRequested = FALSE;
+                State->Graph.IsTabCapture = FALSE;
             }
 
             for (AppCommand* Cmd = NULL; AppNextViewCommand(&Cmd); ) {
@@ -1130,10 +1154,22 @@ APP_VIEW_UI_FUNC_DEF(FLVView)
 
                     case APP_COMMAND_KIND_EXPORT_GRAPH_PNG: {
                         State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_FILE;
+                        State->Graph.IsTabCapture = FALSE;
                     } break;
 
                     case APP_COMMAND_KIND_COPY_GRAPH_IMAGE: {
                         State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_CLIPBOARD;
+                        State->Graph.IsTabCapture = FALSE;
+                    } break;
+
+                    case APP_COMMAND_KIND_EXPORT_TAB_PNG: {
+                        State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_FILE;
+                        State->Graph.IsTabCapture = TRUE;
+                    } break;
+
+                    case APP_COMMAND_KIND_COPY_TAB_IMAGE: {
+                        State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_CLIPBOARD;
+                        State->Graph.IsTabCapture = TRUE;
                     } break;
 
                     case APP_COMMAND_KIND_EXPORT_TABLE_CSV: {
@@ -1205,6 +1241,30 @@ APP_VIEW_UI_FUNC_DEF(FLVView)
                 RendRequestWindowCapture(WindowState->RendHandle, CaptureRect);
             } else {
                 State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_NULL;
+            }
+
+            // NOTE(nc): a capture of the tab is all of the view, with the
+            //         : tables as they are on the screen. the view asks
+            //         : for it, so a tab with no graph has one too.
+            if (State->Graph.IsTabCapture && State->Graph.CaptureKind) {
+                State->Graph.CaptureRect = Rect;
+                State->Graph.IsCaptureRequested = TRUE;
+                AppRequestFrame();
+            }
+
+            // NOTE(nc): the hot graph, or the view, asked for a capture in
+            //         : this frame. if none did, the command is dropped.
+            if (State->Graph.IsCaptureRequested) {
+                r2i32 CaptureRect = {};
+
+                CaptureRect.X0 = (i32) FloorF32(State->Graph.CaptureRect.X0);
+                CaptureRect.Y0 = (i32) FloorF32(State->Graph.CaptureRect.Y0);
+                CaptureRect.X1 = (i32) CeilF32(State->Graph.CaptureRect.X1);
+                CaptureRect.Y1 = (i32) CeilF32(State->Graph.CaptureRect.Y1);
+                RendRequestWindowCapture(WindowState->RendHandle, CaptureRect);
+            } else {
+                State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_NULL;
+                State->Graph.IsTabCapture = FALSE;
             }
 
             if (

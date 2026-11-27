@@ -24,16 +24,12 @@ global readonly FLAPGraphSettingInfo FLAP_GRAPH_SETTING_INFO_TABLE[FLAP_GRAPH_SE
         Str8Lit("Show Minimap")
     },
     {
-        Str8Lit("show_flags_on_graph"),
-        Str8Lit("Show Flags On Graph")
+        Str8Lit("show_flags"),
+        Str8Lit("Show Flags")
     },
     {
         Str8Lit("show_modes_on_graph"),
         Str8Lit("Show Modes On Graph")
-    },
-    {
-        Str8Lit("show_flags_on_minimap"),
-        Str8Lit("Show Flags On Minimap")
     },
     {
         Str8Lit("show_modes_on_minimap"),
@@ -992,6 +988,54 @@ FLAPGraphZoomValueRange(r1f32 Range, f32 Factor, OUT r1f32* Result)
     return IsValid;
 }
 
+// NOTE(nc): for each pixel of the width of the plot, the flags that have
+//         : a range at it, one bit for each flag. the ranges of a flag
+//         : that share a pixel are one bit. a flag after the first 64 has
+//         : no bit. the view has a span and the plot has a width.
+INTERNAL u64*
+FLAPGraphFlagMasks(Arena* MemPool, FLAPGraphDrawData const* Data)
+{
+    u32 Width = Data->Width;
+    r1u64 ViewRange = Data->TimeRangeUSecs;
+    f64 PXPerUSec = (f64) Width / (f64) Length(ViewRange);
+    u64* Result = ArenaPushArrayZero(MemPool, u64, Width);
+    u32 Count = MIN(Data->FlagsCount, (u32) FLAP_GRAPH_FLAGS_MAX);
+
+    for (u32 FlagIndex = 0; FlagIndex < Count; ++FlagIndex) {
+        FLVRenderFlag const* Flag = Data->Flags[FlagIndex];
+        u64 Bit = 1ULL << FlagIndex;
+
+        for (u64 Index = 0; Index < Flag->Count; ++Index) {
+            r1u64 Range = Flag->Ranges[Index];
+
+            if (Range.Max <= ViewRange.Min || Range.Min >= ViewRange.Max)
+                continue;
+
+            u32 First = MIN(
+                (u32) (
+                    (f64) (
+                        MAX(Range.Min, ViewRange.Min) - ViewRange.Min
+                    ) * PXPerUSec
+                ),
+                Width - 1
+            );
+            u32 Last = MIN(
+                (u32) (
+                    (f64) (
+                        MIN(Range.Max, ViewRange.Max) - 1 - ViewRange.Min
+                    ) * PXPerUSec
+                ),
+                Width - 1
+            );
+
+            for (u32 Pixel = First; Pixel <= Last; ++Pixel)
+                Result[Pixel] |= Bit;
+        }
+    }
+
+    return Result;
+}
+
 INTERNAL
 UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
 {
@@ -1084,68 +1128,40 @@ UI_BOX_CUSTOM_DRAW(FLAPGraphDraw)
             }
         }
 
-        // NOTE(nc): the flags, one lane for each at the bottom edge of the
-        //         : plot, the first flag at the bottom. the ranges of a
-        //         : flag that share a pixel are one rect.
+        // NOTE(nc): the flags, as colours on the row of the time below
+        //         : the plot. the flags that are at one pixel share the
+        //         : height of the row in equal parts, the first flag at
+        //         : the top. the pixels next to each other with the same
+        //         : flags are one rect for each flag. the time labels are
+        //         : drawn after this, so they are over it.
         if (Data->FlagsCount) {
-            u8* Bands = ArenaPushArray(Scratch.MemPool, u8, Width);
-            f32 Lane = MAX(3.0f, FloorF32(0.4f * Box->FontSize));
+            u64* Masks = FLAPGraphFlagMasks(Scratch.MemPool, Data);
+            f32 RowHeight = Box->Rect.Y1 - PlotRect.Y1;
 
-            for (u32 FlagIndex = 0; FlagIndex < Data->FlagsCount; ++FlagIndex) {
-                FLVRenderFlag const* Flag = Data->Flags[FlagIndex];
-                f32 LaneY1 = PlotRect.Y1 - (f32) FlagIndex * Lane;
+            for (u32 Pixel = 0; Pixel < Width; ) {
+                u64 Mask = Masks[Pixel];
+                u32 Start = Pixel;
 
-                // NOTE(nc): no room for more lanes
-                if (LaneY1 - Lane < PlotRect.Y0)
-                    break;
+                for ( ; Pixel < Width && Masks[Pixel] == Mask; ++Pixel);
 
-                MemZero(Bands, Width);
+                if (!Mask)
+                    continue;
 
-                for (u64 Index = 0; Index < Flag->Count; ++Index) {
-                    r1u64 Range = Flag->Ranges[Index];
+                f32 Share = RowHeight / (f32) PopCount64(Mask);
+                f32 Y = PlotRect.Y1;
 
-                    if (Range.Max <= ViewRange.Min || Range.Min >= ViewRange.Max)
-                        continue;
+                for (u64 Bits = Mask; Bits; Bits &= Bits - 1, Y += Share) {
+                    v4f32 Colour = Data->FlagColours[Ctz64(Bits)];
 
-                    u32 First = MIN(
-                        (u32) (
-                            (f64) (
-                                MAX(Range.Min, ViewRange.Min) - ViewRange.Min
-                            ) * PXPerUSec
-                        ),
-                        Width - 1
-                    );
-                    u32 Last = MIN(
-                        (u32) (
-                            (f64) (
-                                MIN(Range.Max, ViewRange.Max) - 1 - ViewRange.Min
-                            ) * PXPerUSec
-                        ),
-                        Width - 1
-                    );
-
-                    for (u32 Pixel = First; Pixel <= Last; ++Pixel)
-                        Bands[Pixel] = 1;
-                }
-
-                for (u32 Pixel = 0; Pixel < Width; ) {
-                    if (!Bands[Pixel]) {
-                        ++Pixel;
-                        continue;
-                    }
-
-                    u32 Start = Pixel;
-
-                    for ( ; Pixel < Width && Bands[Pixel]; ++Pixel);
-
+                    Colour.W *= FLAP_GRAPH_FLAG_ALPHA;
                     DrawRect(
                         Rng(
                             PlotRect.X0 + (f32) Start,
-                            LaneY1 - Lane,
+                            FloorF32(Y),
                             PlotRect.X0 + (f32) Pixel,
-                            LaneY1
+                            FloorF32(Y + Share)
                         ),
-                        Data->FlagColours[FlagIndex],
+                        Colour,
                         0.0f,
                         0.0f,
                         0.0f
@@ -1720,19 +1736,6 @@ FLAPGraphMinimapObjectCreate(
     MemCpy(Colours, Key.Str + Offset, sizeof(u32) * Head.ColoursCount);
     Offset += sizeof(u32) * Head.ColoursCount;
 
-    u32* FlagColours = ArenaPushArray(
-        Scratch.MemPool,
-        u32,
-        Head.FlagColoursCount
-    );
-
-    MemCpy(
-        FlagColours, 
-        Key.Str + Offset, 
-        sizeof(u32) * Head.FlagColoursCount
-    );
-    Offset += sizeof(u32) * Head.FlagColoursCount;
-
     u32* ModeColours = ArenaPushArray(
         Scratch.MemPool,
         u32,
@@ -2001,67 +2004,6 @@ FLAPGraphMinimapObjectCreate(
                 }
             }
 
-            // NOTE(nc): the flags, one lane for each at the bottom, in the
-            //         : order of the graph. over the curves, since the
-            //         : strip is small. a range is one texel at the least.
-            u32 FlagIndex = 0;
-
-            for (
-                u32 Index = 0;
-                Head.FlagColoursCount && Index < Program->EmitCount;
-                ++Index
-            ) {
-                if (
-                    Program->Emits[Index].DisplayKind != TOKEN_KIND_FLAG ||
-                    Items[Index].IsMissing
-                ) {
-                    continue;
-                }
-
-                FLVRenderFlag const* Flag = &Items[Index].Flag;
-                i32 Bottom = FLAP_GRAPH_MINIMAP_HEIGHT - 1 - (i32) (
-                    FlagIndex * FLAP_GRAPH_MINIMAP_LANE
-                );
-                u32 Pixel = FlagColours[FlagIndex % Head.FlagColoursCount];
-
-                ++FlagIndex;
-
-                // NOTE(nc): no room for more lanes
-                if (Bottom < FLAP_GRAPH_MINIMAP_LANE - 1)
-                    break;
-
-                for (
-                    u64 RangeIndex = 0; 
-                    RangeIndex < Flag->Count; 
-                    ++RangeIndex
-                ) {
-                    u64 Start = MAX(Flag->Ranges[RangeIndex].Min, Fit.Min);
-                    u64 End = MIN(Flag->Ranges[RangeIndex].Max, Fit.Max);
-
-                    if (Start >= End)
-                        continue;
-
-                    i32 X0 = (i32) ((f64) (Start - Fit.Min) * TexelsPerUSec);
-                    i32 X1 = MIN(
-                        MAX(
-                            (i32) ((f64) (End - Fit.Min) * TexelsPerUSec),
-                            X0 + 1
-                        ),
-                        FLAP_GRAPH_MINIMAP_WIDTH
-                    );
-
-                    for (i32 X = X0; X < X1; ++X) {
-                        FLAPGraphMinimapSpan(
-                            Pixels,
-                            X,
-                            Bottom - (FLAP_GRAPH_MINIMAP_LANE - 1),
-                            Bottom,
-                            Pixel
-                        );
-                    }
-                }
-            }
-
             RendHandle Texture = Tex2DAlloc(
                 RESOURCE_KIND_STATIC,
                 Vec(
@@ -2105,8 +2047,6 @@ FLAPGraphMinimapObject(
     FLAPGraphParams* Params,
     FLAPGraphDrawData* Data,
     r1u64 Fit,
-    v4f32* FlagColours,
-    u32 FlagColoursCount,
     v4f32* ModeColours
 ) {
     TempArena Scratch = GetScratch(NULL, 0);
@@ -2114,11 +2054,7 @@ FLAPGraphMinimapObject(
     u32 ModeColoursCount = ModeColours 
         ? FLAP_GRAPH_MODE_COLOURS 
         : 0;
-    u32 ColoursCount = (
-        Data->CurvesCount + 
-        FlagColoursCount + 
-        ModeColoursCount
-    );
+    u32 ColoursCount = Data->CurvesCount + ModeColoursCount;
     u32* Colours = ArenaPushArray(
         Scratch.MemPool, 
         u32, 
@@ -2132,19 +2068,12 @@ FLAPGraphMinimapObject(
     Head.TimeRangeUSecs = Fit;
     Head.AnalysisIndex = Params->AnalysisIndex;
     Head.ColoursCount = Data->CurvesCount;
-    Head.FlagColoursCount = FlagColoursCount;
     Head.ModeColoursCount = ModeColoursCount;
 
     for (u32 Index = 0; Index < Data->CurvesCount; ++Index)
         Colours[Count++] = FLAPGraphMinimapPixel(
             Data->Curves[Index].Colour
         );
-
-    for (u32 Index = 0; Index < FlagColoursCount; ++Index) {
-        Colours[Count++] = FLAPGraphMinimapPixel(
-            FlagColours[Index]
-        );
-    }
 
     for (u32 Index = 0; Index < ModeColoursCount; ++Index) {
         Colours[Count++] = FLAPGraphMinimapPixel(
@@ -2292,11 +2221,15 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
 
     f32 RowHeight = UIHeadPXHeight();
     b32 IsReady = TRUE;
+    // NOTE(nc): a capture of the tab is a capture for all its graphs, so
+    //         : none of them has a box or a ring in the image.
     b32 IsCapture = (
         State->CaptureKind &&
         !State->IsCaptureRequested &&
-        State->HasHotKey &&
-        State->HotKey == Params->Key
+        (
+            State->IsTabCapture ||
+            (State->HasHotKey && State->HotKey == Params->Key)
+        )
     );
     b32 HasCursor = State->HasCursor;
     FLAPGraphClock const* Clock = (
@@ -2351,18 +2284,14 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
         Params->Settings & (1 << FLAP_GRAPH_SETTING_KIND_TIME_FROM_CURSOR)
     );
 
-    // NOTE(nc): the flags and the modes each have a toggle for the graph
-    //         : and one for the minimap. what both are off for is not
-    //         : looked up.
-    b32 HasGraphFlags = !!(
-        Params->Settings & (1 << FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS_ON_GRAPH)
+// NOTE(nc): the flags have one toggle, and they are on the graph
+    //         : only. the modes have a toggle for the graph and one for
+    //         : the minimap. what is off is not looked up.
+    b32 HasFlags = !!(
+        Params->Settings & (1 << FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS)
     );
     b32 HasGraphModes = !!(
         Params->Settings & (1 << FLAP_GRAPH_SETTING_KIND_SHOW_MODES_ON_GRAPH)
-    );
-    b32 HasMinimapFlags = (
-        HasMinimap &&
-        (Params->Settings & (1 << FLAP_GRAPH_SETTING_KIND_SHOW_FLAGS_ON_MINIMAP))
     );
     b32 HasMinimapModes = (
         HasMinimap &&
@@ -2371,12 +2300,11 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
     Str8* FlagNames = NULL;
     v4f32* FlagColours = NULL;
     v4f32* ModeColours = NULL;
-    u32 FlagColoursCount = 0;
 
     // NOTE(nc): a flag takes its colour from the far end of the palette of
     //         : the curves, so that the first flags and the first curves
     //         : do not share one.
-    if (HasGraphFlags || HasMinimapFlags) {
+    if (HasFlags) {
         Data->Flags = ArenaPushArrayZero(
             UIBuildMemPool(),
             FLVRenderFlag const*,
@@ -2401,22 +2329,21 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
                 continue;
             }
 
-            Data->Flags[FlagColoursCount] = &Items[Index].Flag;
-            FlagNames[FlagColoursCount] = Program->Strings[
+            Data->Flags[Data->FlagsCount] = &Items[Index].Flag;
+            FlagNames[Data->FlagsCount] = Program->Strings[
                 Program->Emits[Index].LabelStringIndex
             ];
-            FlagColours[FlagColoursCount] = UIColourFromName(
+            FlagColours[Data->FlagsCount] = UIColourFromName(
                 ArenaPushStrFmt(
                     UIBuildMemPool(),
                     "curve_%u",
-                    7 - (FlagColoursCount % 8)
+                    7 - (Data->FlagsCount % 8)
                 )
             );
-            ++FlagColoursCount;
+            ++Data->FlagsCount;
         }
 
         Data->FlagColours = FlagColours;
-        Data->FlagsCount = HasGraphFlags ? FlagColoursCount : 0;
     }
 
     if (HasGraphModes || HasMinimapModes) {
@@ -2607,8 +2534,8 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
         ++Data->CurvesCount;
     }
 
-    // NOTE(nc): a flag that has a lane on the graph is in the legend, in
-    //         : the colour of its lane
+    // NOTE(nc): a flag that is on the time scale is in the legend, in its
+    //         : colour
     for (u32 Index = 0; Index < Data->FlagsCount; ++Index) {
         FLAPGraphDrawLabel* Label = &Data->Labels[Data->LabelsCount++];
 
@@ -2706,7 +2633,8 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
         State->HasHotKey = TRUE;
     }
 
-    if (IsCapture) {
+    // NOTE(nc): the view asks for the capture of a tab, with its own rect
+    if (IsCapture && !State->IsTabCapture) {
         State->CaptureRect = Box->Rect;
         State->IsCaptureRequested = TRUE;
         AppRequestFrame();
@@ -2821,6 +2749,39 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
                                                 Data->Modes[ModeIndex].Mode
                                             )
                                         )
+                                    );
+                                }
+                            }
+                        }
+
+                        // NOTE(nc): the flags that have a range at the
+                        //         : time of the box, each name in the
+                        //         : colour of its flag
+                        for (
+                            u32 Index = 0;
+                            Index < Data->FlagsCount;
+                            ++Index
+                        ) {
+                            FLVRenderFlag const* Flag = Data->Flags[Index];
+                            b32 IsFlagged = FALSE;
+
+                            for (
+                                u64 Range = 0;
+                                Range < Flag->Count && !IsFlagged;
+                                ++Range
+                            ) {
+                                IsFlagged = (
+                                    Flag->Ranges[Range].Min < HoverRange.Max &&
+                                    Flag->Ranges[Range].Max > HoverRange.Min
+                                );
+                            }
+
+                            if (IsFlagged) {
+                                UITextColour(FlagColours[Index]) {
+                                    UILabel(
+                                        "%S###hover_flag_%u",
+                                        PRINT_STR(FlagNames[Index]),
+                                        Index
                                     );
                                 }
                             }
@@ -3044,12 +3005,6 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
                 Params,
                 Data,
                 Fit,
-                HasMinimapFlags 
-                    ? FlagColours 
-                    : NULL,
-                HasMinimapFlags 
-                    ? FlagColoursCount 
-                    : 0,
                 HasMinimapModes 
                     ? ModeColours 
                     : NULL

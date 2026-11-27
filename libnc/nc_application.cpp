@@ -1125,6 +1125,20 @@ AppCommandKindInfo APP_COMMAND_KIND_INFO_TABLE[APP_COMMAND_KIND_COUNT] = {
         APP_COMMAND_KIND_FLAG_LIST_IN_UI
     },
     {
+        Str8Lit("export_tab_png"),
+        Str8Lit("Writes all the views of the tab to one PNG file, in the folder of the FLV file."),
+        Str8Lit("export,save,png,image,picture,tab,all,screenshot"),
+        Str8Lit(""),
+        APP_COMMAND_KIND_FLAG_LIST_IN_UI
+    },
+    {
+        Str8Lit("copy_tab_image"),
+        Str8Lit("Copies all the views of the tab to the clipboard, as one image."),
+        Str8Lit("copy,clipboard,image,picture,tab,all,screenshot"),
+        Str8Lit(""),
+        APP_COMMAND_KIND_FLAG_LIST_IN_UI
+    },
+    {
         Str8Lit("explorer"),
         Str8Lit("Opens a tab that shows the flights and the View files."),
         Str8Lit("files,views,logs,bin,fli,flv,flights"),
@@ -1140,7 +1154,7 @@ AppCommandKindInfo APP_COMMAND_KIND_INFO_TABLE[APP_COMMAND_KIND_COUNT] = {
     }
 };
 
-BindingTableEntry APP_DEFAULT_BINDING_TABLE[90] = {
+BindingTableEntry APP_DEFAULT_BINDING_TABLE[92] = {
     {
         Str8Lit("inc_window_font_size"),
         {
@@ -1770,6 +1784,20 @@ BindingTableEntry APP_DEFAULT_BINDING_TABLE[90] = {
             INPUT_KIND_C,
             INPUT_MOD_KIND_CTRL | INPUT_MOD_KIND_SHIFT
         }
+    },
+    {
+        Str8Lit("export_tab_png"),
+        {
+            INPUT_KIND_E,
+            INPUT_MOD_KIND_CTRL | INPUT_MOD_KIND_ALT
+        }
+    },
+    {
+        Str8Lit("copy_tab_image"),
+        {
+            INPUT_KIND_C,
+            INPUT_MOD_KIND_CTRL | INPUT_MOD_KIND_ALT
+        }
     }
 };
 
@@ -1924,7 +1952,7 @@ AppNameSchemaInfo APP_NAME_SCHEMA_INFO_TABLE[12] = {
     {
         Str8Lit("session"),
         FALSE,
-        Str8Lit("@expand_commands(edit_session_theme) x:\n{\n @display_name('Animations') @description(\"Enables animations.\")\n\n@default(1) 'animations': bool,\n@display_name('Scrolling Animations') @description(\"Enables scrolling animations.\")\n@expand_if(\"$.animations\") @default(1) 'scrolling_animations': bool,\n@display_name('Tooltip Animations') @description(\"Enables tooltip animations.\")\n@expand_if(\"$.animations\") @default(1) 'tooltip_animations': bool,\n@display_name('Menu Animations') @description(\"Enables menu animations.\")\n@expand_if(\"$.animations\") @default(1) 'menu_animations': bool,\n\n@display_name('UI Font') @description(\"The name of, or path to, the font used when displaying non-code UI elements.\")\n@default('') 'main_font': string,\n@display_name('Code Font') @description(\"The name of, or path to, the font used when displaying code.\")\n@default('') 'code_font': string,\n\n@no_expand @default('query:commands') 'cmd': string,\n\n@default(\"Ayu Dark\") @display_name('Theme')\n@description(\"The session theme, which describes all colours used throughout the UI.\")\n'theme': string,\n@no_expand @display_name('Theme Colours')\n'theme_colours': query,\n\n@display_name('Autocompletion Lister') @description(\"Enables the autocompletion lister while typing expressions.\") @default(1)\n'autocompletion_lister': bool,\n\n@default(1) @display_name('Cursor Trail') @description(\"Shows a trail after the cursor as it moves\")\n'cursor_trail': bool,\n\n@default(0) @display_name('Opaque Backgrounds') @description(\"Controls whether or not all floating background colours are forced to be fully opaque.\")\n'opaque_backgrounds': bool,\n@default(1) @display_name('Background Blur') @description(\"Controls whether or not occluded regions behind floating elements are blurred.\")\n'background_blur': bool,\n\n@default(1) @display_name('Drop Shadows') @description(\"Controls whether or not drop shadows are drawn.\")\n'drop_shadows': bool,\n@default(1.0f) @display_name('Rounded Corner Amount') @description(\"Controls the degree to which UI corners are rounded.\")\n'rounded_corner_amount': @range[0, 1] f32,\n\n@default(2) @display_name('Tab Width') 'tab_width': @range[1, 32] u64,\n\n@default(1) @display_name('Focus Menu Bar With Alt') @description(\"Mimics standard Windows behavior of focusing the menu bar using the Alt key.\")\n'focus_menu_bar_with_alt': bool,\n\n@default(0) @display_name('Use Native File System Dialog') @description(\"Uses the operating system's file system dialog box, rather than the application's built-in UI.\")\n'use_native_file_system_dialog': bool,\n}\n")
+        Str8Lit("@expand_commands(edit_session_theme) x:\n{\n @display_name('Animations') @description(\"Enables animations.\")\n\n@default(1) 'animations': bool,\n@display_name('Scrolling Animations') @description(\"Enables scrolling animations.\")\n@expand_if(\"$.animations\") @default(1) 'scrolling_animations': bool,\n@display_name('Tooltip Animations') @description(\"Enables tooltip animations.\")\n@expand_if(\"$.animations\") @default(1) 'tooltip_animations': bool,\n@display_name('Menu Animations') @description(\"Enables menu animations.\")\n@expand_if(\"$.animations\") @default(1) 'menu_animations': bool,\n\n@display_name('UI Font') @description(\"The name of, or path to, the font used when displaying non-code UI elements.\")\n@default('') 'main_font': string,\n@display_name('Code Font') @description(\"The name of, or path to, the font used when displaying code.\")\n@default('') 'code_font': string,\n\n@no_expand @default('query:commands') 'cmd': string,\n\n@default(\"Ayu Dark\") @display_name('Theme')\n@description(\"The session theme, which describes all colours used throughout the UI.\")\n'theme': string,\n@no_expand @display_name('Theme Colours')\n'theme_colours': query,\n\n@display_name('Autocompletion Lister') @description(\"Enables the autocompletion lister while typing expressions.\") @default(1)\n'autocompletion_lister': bool,\n\n@default(1) @display_name('Cursor Trail') @description(\"Shows a trail after the cursor as it moves\")\n'cursor_trail': bool,\n\n@default(0) @display_name('Opaque Backgrounds') @description(\"Controls whether or not all floating background colours are forced to be fully opaque.\")\n'opaque_backgrounds': bool,\n@default(1) @display_name('Background Blur') @description(\"Controls whether or not occluded regions behind floating elements are blurred.\")\n'background_blur': bool,\n\n@default(1) @display_name('Drop Shadows') @description(\"Controls whether or not drop shadows are drawn.\")\n'drop_shadows': bool,\n@default(1.0f) @display_name('Rounded Corner Amount') @description(\"Controls the degree to which UI corners are rounded.\")\n'rounded_corner_amount': @range[0, 1] f32,\n\n@default(2) @display_name('Tab Width') 'tab_width': @range[1, 32] u64,\n\n@default(1) @display_name('Focus Menu Bar With Alt') @description(\"Mimics standard Windows behavior of focusing the menu bar using the Alt key.\")\n'focus_menu_bar_with_alt': bool,\n\n@default(0) @display_name('Use Native File System Dialog') @description(\"Uses the operating system's file system dialog box, rather than the application's built-in UI.\")\n'use_native_file_system_dialog': bool,\n  @default(1) @display_name('Add Folders Recursively') @description(\"When a folder is added, the folders inside it are read too.\")\n'recursive_folders': bool,\n\n}\n")
     },
     {
         Str8Lit("theme_colour"),
@@ -1979,7 +2007,7 @@ AppNameSchemaInfo APP_NAME_SCHEMA_INFO_TABLE[12] = {
     {
         Str8Lit("flv_view"),
         FALSE,
-        Str8Lit("@inherit(tab) x:\n{\n  @display_name('View File') @description(\"The FLV file that the tab shows.\")\n  'file': @no_relativise path,\n  @default(0) @display_name('Auto Fit Y') @description(\"Fits the value axis of a graph to the data in view as the view moves. When off, the value axis is held from the last fit.\")\n  @default(0) @display_name('Lock Y Axis') @description(\"Keeps the value axis of a graph where it is. A drag moves the view in time only.\")\n  'lock_y': bool,\n  @default(0) @display_name('Show Minimap') @description(\"Shows a small picture of the whole flight under each graph, with a box for the view.\")\n  'show_minimap': bool,\n  @default(0) @display_name('Show Flags On Graph') @description(\"Draws the flags of an analysis on its graph.\")\n  'show_flags_on_graph': bool,\n  @default(0) @display_name('Show Modes On Graph') @description(\"Tints the plot of a graph with the flight mode.\")\n  'show_modes_on_graph': bool,\n  @default(0) @display_name('Show Flags On Minimap') @description(\"Draws the flags of an analysis on its minimap.\")\n  'show_flags_on_minimap': bool,\n  @default(0) @display_name('Show Modes On Minimap') @description(\"Tints the minimap of a graph with the flight mode.\")\n  'show_modes_on_minimap': bool,\n  @default(0) @display_name('Time') @description(\"Relative Time is the seconds from the start of the file. Local Time is the local time of day, from the GPS time of the flight. A flight with no GPS time shows Relative Time.\")\n  'time_mode': @options('Relative Time', 'Local Time') u64,\n  @default(0) @display_name('Relative To Cursor') @description(\"Shows the time axis of a graph as the time before and after the cursor, with the time of the cursor at its line. With no cursor on a graph, the time axis has no labels. Turning this on sets Time to Local Time.\")\n  'time_from_cursor': bool,\n}\n")
+        Str8Lit("@inherit(tab) x:\n{\n  @display_name('View File') @description(\"The FLV file that the tab shows.\")\n  'file': @no_relativise path,\n  @default(0) @display_name('Auto Fit Y') @description(\"Fits the value axis of a graph to the data in view as the view moves. When off, the value axis is held from the last fit.\")\n  @default(0) @display_name('Lock Y Axis') @description(\"Keeps the value axis of a graph where it is. A drag moves the view in time only.\")\n  'lock_y': bool,\n  @default(0) @display_name('Show Minimap') @description(\"Shows a small picture of the whole flight under each graph, with a box for the view.\")\n  'show_minimap': bool,\n   @default(0) @display_name('Show Flags') @description(\"Shows the flags of an analysis as colours on the time scale of its graph.\")\n  'show_flags': bool,\n  @default(0) @display_name('Show Modes On Graph') @description(\"Tints the plot of a graph with the flight mode.\")\n  'show_modes_on_graph': bool,\n  @default(0) @display_name('Show Modes On Minimap') @description(\"Tints the minimap of a graph with the flight mode.\")\n  'show_modes_on_minimap': bool,\n  @default(0) @display_name('Time') @description(\"Relative Time is the seconds from the start of the file. Local Time is the local time of day, from the GPS time of the flight. A flight with no GPS time shows Relative Time.\")\n  'time_mode': @options('Relative Time', 'Local Time') u64,\n  @default(0) @display_name('Relative To Cursor') @description(\"Shows the time axis of a graph as the time before and after the cursor, with the time of the cursor at its line. With no cursor on a graph, the time axis has no labels. Turning this on sets Time to Local Time.\")\n  'time_from_cursor': bool,\n}\n")
     }
 };
 
@@ -2157,7 +2185,7 @@ Str8 APP_TAB_FAST_PATH_QUERY_NAME[APP_COMMAND_KIND_COUNT - APP_COMMAND_KIND_FIRS
     Str8Lit("")
 };
 
-AppVocabInfo APP_VOCAB_INFO_TABLE[182] = {
+AppVocabInfo APP_VOCAB_INFO_TABLE[184] = {
     { 
         Str8Lit("view"),
         Str8Lit("views"),
@@ -3431,6 +3459,20 @@ AppVocabInfo APP_VOCAB_INFO_TABLE[182] = {
         Str8Lit("Export Table as TXT"),
         Str8Lit(""),
         APP_ICON_KIND_FILE_FILLED
+    },
+    {
+        Str8Lit("export_tab_png"),
+        Str8Lit(""),
+        Str8Lit("Export All Tab Contents as Single PNG"),
+        Str8Lit(""),
+        APP_ICON_KIND_FILE_FILLED
+    },
+    {
+        Str8Lit("copy_tab_image"),
+        Str8Lit(""),
+        Str8Lit("Copy All Tab Contents as Single Image"),
+        Str8Lit(""),
+        APP_ICON_KIND_FILE_FILLED
     }
 };
 EXTERN_C_LINK_END
@@ -4263,21 +4305,29 @@ AppTitleFStrFromCodeName(Arena* MemPool, Str8 CodeName)
                 "  "_s8
             );
         }
+    } else {
+        ListPush(
+            MemPool,
+            &Result,
+            &Params,
+            NULL,
+            "   "_s8
+        );
+    }
 
-        if (Info->DisplayName.Size) {
-            ListPush(MemPool, &Result, &Params, NULL, Info->DisplayName);
-        } else {
-            Overrides.Font = AppFontFromSlot(APP_FONT_SLOT_CODE);
-            Overrides.RasterKind = AppRasterKindFromSlot(APP_FONT_SLOT_CODE);
-            Overrides.Colour = Vec(0.0f, 0.0f, 0.0f, 0.0f);
-            ListPush(
-                MemPool,
-                &Result,
-                &Params,
-                &Overrides,
-                CodeName
-            );
-        }
+    if (Info->DisplayName.Size) {
+        ListPush(MemPool, &Result, &Params, NULL, Info->DisplayName);
+    } else {
+        Overrides.Font = AppFontFromSlot(APP_FONT_SLOT_CODE);
+        Overrides.RasterKind = AppRasterKindFromSlot(APP_FONT_SLOT_CODE);
+        Overrides.Colour = Vec(0.0f, 0.0f, 0.0f, 0.0f);
+        ListPush(
+            MemPool,
+            &Result,
+            &Params,
+            &Overrides,
+            CodeName
+        );
     }
 
     return Result;
@@ -8494,9 +8544,16 @@ AppPathIsLog(Str8 Path)
     return Result;
 }
 
+// NOTE(nc): the BIN, FLI and FLV files of a folder, and of the folders
+//         : inside it when IsRecursive. an FLI with a BIN of the same
+//         : name is not added, since the BIN uses it.
 INTERNAL void
-AppPushLogPathsFromDir(Arena* MemPool, Str8List* Paths, Str8 Dir)
-{
+AppPushLogPathsFromDir(
+    Arena* MemPool,
+    Str8List* Paths,
+    Str8 Dir,
+    b32 IsRecursive
+) {
     Str8List Dirs = {};
     Str8List FLIs = {};
 
@@ -8513,16 +8570,16 @@ AppPushLogPathsFromDir(Arena* MemPool, Str8List* Paths, Str8 Dir)
                 PRINT_STR(DirNode->String),
                 PRINT_STR(Info.Name)
             );
+            Str8 Ext = StrSkipLastDot(FullPath);
 
             if (Info.Properties.Kind & SYS_FILE_IS_DIR) {
-                ListPush(MemPool, &Dirs, FullPath);
-            } else if (
-                StrMatch(
-                    StrSkipLastDot(FullPath), 
-                    "bin"_s8, 
-                    STR_MATCH_ALL_CASES
-                )
-            ) {
+                if (IsRecursive)
+                    ListPush(MemPool, &Dirs, FullPath);
+            } else if (StrMatch(Ext, "bin"_s8, STR_MATCH_ALL_CASES)) {
+                ListPush(MemPool, Paths, FullPath);
+            } else if (StrMatch(Ext, "flv"_s8, STR_MATCH_ALL_CASES)) {
+                // NOTE(nc): take this branch out to leave the FLV files
+                //         : of a folder out
                 ListPush(MemPool, Paths, FullPath);
             } else if (AppPathIsLog(FullPath)) {
                 ListPush(MemPool, &FLIs, FullPath);
@@ -8546,6 +8603,76 @@ AppPushLogPathsFromDir(Arena* MemPool, Str8List* Paths, Str8 Dir)
 
         if (!HasBIN)
             ListPush(MemPool, Paths, Node->String);
+    }
+}
+
+// NOTE(nc): a BIN, an FLI or an FLV, or the ones of a folder, into the
+//         : lists of the session. a file of another kind is not added.
+//         : the explorer is opened, so what was added is seen.
+INTERNAL void
+AppOpenPath(Str8 RawPath, b32 IsRecursive)
+{
+    TempArena Scratch = GetScratch(NULL, 0);
+    Str8 Path = StrTrimLastSlash(
+        PathAbsoluteDstFromRelativeDstSrc(
+            Scratch.MemPool,
+            RawPath,
+            GetCurrentPath(Scratch.MemPool)
+        )
+    );
+    FileProperties Props = SystemGetFileProperties(Path);
+    b32 IsFolder = !!(Props.Kind & SYS_FILE_IS_DIR);
+    Str8List Paths = {};
+
+    if (IsFolder) {
+        AppPushLogPathsFromDir(Scratch.MemPool, &Paths, Path, IsRecursive);
+    } else if (
+        Props.Created &&
+        (
+            AppPathIsLog(Path) ||
+            StrMatch(StrSkipLastDot(Path), "flv"_s8, STR_MATCH_ALL_CASES)
+        )
+    ) {
+        ListPush(Scratch.MemPool, &Paths, Path);
+    }
+
+    for (Str8Node* Node = Paths.Head; Node; Node = Node->Next) {
+        if (AppSessionRecordPath(Node->String))
+            AppFileRecorded(Node->String);
+    }
+
+    if (!Paths.Count) {
+        LogError("could not open file '%S'", PRINT_STR(Path));
+    } else {
+        AppCmd(APP_COMMAND_KIND_OPEN_EXPLORER);
+        AppCmd(
+            APP_COMMAND_KIND_SET_CURRENT_PATH,
+            __Registers.FilePath = IsFolder
+                ? Path
+                : StrChopLastSlash(Path)
+        );
+    }
+
+    ReleaseScratch(Scratch);
+}
+
+// NOTE(nc): the paths of one drop. a folder is always read with the
+//         : folders inside it. the BIN files are first, so an FLI that is
+//         : dropped with its BIN is not added.
+INTERNAL void
+AppOpenDroppedPaths(Str8List* Paths)
+{
+    for (u32 Pass = 0; Pass < 2; ++Pass) {
+        for (Str8Node* Node = Paths->Head; Node; Node = Node->Next) {
+            b32 IsBIN = !!StrMatch(
+                StrSkipLastDot(Node->String),
+                "bin"_s8,
+                STR_MATCH_ALL_CASES
+            );
+
+            if (IsBIN == !Pass)
+                AppOpenPath(Node->String, TRUE);
+        }
     }
 }
 
@@ -12286,50 +12413,10 @@ AppFrame(void)
                     } break;
 
                     case APP_COMMAND_KIND_OPEN: {
-                        Str8 Path = StrTrimLastSlash(
-                            PathAbsoluteDstFromRelativeDstSrc(
-                                Scratch.MemPool,
-                                Registers()->FilePath,
-                                GetCurrentPath(Scratch.MemPool)
-                            )
+                        AppOpenPath(
+                            Registers()->FilePath,
+                            AppSettingFromNameB32("recursive_folders"_s8)
                         );
-                        FileProperties Props = SystemGetFileProperties(Path);
-                        b32 IsFolder = !!(Props.Kind & SYS_FILE_IS_DIR);
-                        Str8List Paths = {};
-
-                        if (IsFolder) {
-                            AppPushLogPathsFromDir(
-                                Scratch.MemPool, 
-                                &Paths, 
-                                Path
-                            );
-                        } else if (Props.Created) {
-                            ListPush(Scratch.MemPool, &Paths, Path);
-                        }
-
-                        for (
-                            Str8Node* Node = Paths.Head; 
-                            Node; 
-                            Node = Node->Next
-                        ) {
-                            if (AppSessionRecordPath(Node->String))
-                                AppFileRecorded(Node->String);
-                        }
-
-                        if (!Paths.Count) {
-                            LogError(
-                                "could not open file '%S'", 
-                                PRINT_STR(Path)
-                            );
-                        } else {
-                            AppCmd(APP_COMMAND_KIND_OPEN_EXPLORER);
-                            AppCmd(
-                                APP_COMMAND_KIND_SET_CURRENT_PATH,
-                                __Registers.FilePath = IsFolder
-                                    ? Path
-                                    : StrChopLastSlash(Path)
-                            );
-                        }
                     } break;
 
                     case APP_COMMAND_KIND_SWITCH: {} break;
@@ -18073,9 +18160,15 @@ AppWindowFrame(void)
 
                                                 UIParent(RowOrColumn) {
                                                     UIPadding(UI_PX(Padding, 1.0f)) {
-                                                        UIBuildBoxFromKey(UI_BOX_KIND_DRAW_BORDER, EMPTY_UI_KEY_VALUE);
+                                                        UIBuildBoxFromKey(
+                                                            UI_BOX_KIND_DRAW_BORDER, 
+                                                            EMPTY_UI_KEY_VALUE
+                                                        );
                                                         UISpacer(UI_PX(Padding, 1.0f));
-                                                        UIBuildBoxFromKey(UI_BOX_KIND_DRAW_BORDER, EMPTY_UI_KEY_VALUE);
+                                                        UIBuildBoxFromKey(
+                                                            UI_BOX_KIND_DRAW_BORDER, 
+                                                            EMPTY_UI_KEY_VALUE
+                                                        );
                                                     }
                                                 }
                                             }
@@ -18325,7 +18418,10 @@ AppWindowFrame(void)
                                 UITag("drop_site"_s8) {
                                     UICornerRadius(UIHeadFontSize() * 2.0f) {
                                         UIBuildBoxFromKey(
-                                            UI_BOX_KIND_DRAW_BACKGROUND | UI_BOX_KIND_DRAW_BORDER,
+                                            (
+                                                UI_BOX_KIND_DRAW_BACKGROUND_BLUR |
+                                                UI_BOX_KIND_DRAW_BORDER
+                                            ),
                                             EMPTY_UI_KEY_VALUE
                                         );
                                     }
@@ -18933,10 +19029,15 @@ AppWindowFrame(void)
 
                                 UIRect(FutureSplitRect) {
                                     UITag("drop_site"_s8) {
-                                        UIBuildBoxFromKey(
-                                            UI_BOX_KIND_DRAW_BACKGROUND | UI_BOX_KIND_DRAW_BORDER,
-                                            {}
-                                        );
+                                        UICornerRadius(UIHeadFontSize() * 2.0f) {
+                                            UIBuildBoxFromKey(
+                                                (
+                                                    UI_BOX_KIND_DRAW_BACKGROUND_BLUR |
+                                                    UI_BOX_KIND_DRAW_BORDER
+                                                ),
+                                                {}
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -19179,7 +19280,7 @@ AppWindowFrame(void)
                 TabTask* TailTabTask = NULL;
                 u64 TabTaskCount = 0;
                 f32 TabCloseWidthPX = UIHeadFontSize() * 2.5f;
-                f32 MaxTabWidthPX = UIHeadFontSize() * 40.0f;
+                f32 MaxTabWidthPX = UIHeadFontSize() * 20.0f;
 
                 if (BuildPanel) {
                     UITag("tab"_s8) {
@@ -19206,7 +19307,7 @@ AppWindowFrame(void)
                                 T->FancyStrings = AppTitleFStrFromConfig(Scratch.MemPool, Tab, FALSE);
 
                                 // NOTE(nc): the title, the title box padding, the lead
-                                //         : spacer, and the edit and close buttons
+                                //         : spacer, and the edit and close buttons FUCK
                                 f32 TabWidthTarget = (
                                     DDimensionsFromFancyStrList(UIHeadTabSize(), &T->FancyStrings).X +
                                     10.0f + 
@@ -19215,7 +19316,10 @@ AppWindowFrame(void)
                                     TabCloseWidthPX * 2.0f
                                 );
 
-                                TabWidthTarget = MIN(MaxTabWidthPX, TabWidthTarget);
+                                TabWidthTarget = MIN(
+                                    MaxTabWidthPX, 
+                                    TabWidthTarget
+                                );
 
                                 f32 TabWidth = UIAnimate(
                                     UIKeyFromStrFmt({}, "tab_width_%p", Tab),
@@ -19636,29 +19740,20 @@ AppWindowFrame(void)
 
                 {
                     for (UIEvent* Evt = NULL; UINextEvent(&Evt); ) {
-                        if (Evt->Kind == UI_EVENT_KIND_FILE_DROP && InRange(ContentRect, Evt->Position)) {
+                        if (
+                            Evt->Kind == UI_EVENT_KIND_FILE_DROP && 
+                            InRange(ContentRect, Evt->Position)
+                        ) {
                             b32 NeedDropCompletion = FALSE;
 
                             ArenaClear(WS->DropCompletionMemPool);
                             WS->HeadDropCompletionTask = NULL;
                             WS->DropCompletionPanel = Panel->Config->ID;
 
-                            for (Str8Node* N = Evt->Paths.Head; N; N = N->Next) {
-                                TempArena Scratch = GetScratch(NULL, 0);
-                                Str8 Path = N->String;
-
-                                if (FALSE) {
-                                    // TODO(nathan): add specific file types that need
-                                    //             : specific actions to be taken when dropped
-                                } else {
-                                    AppCmd(
-                                        APP_COMMAND_KIND_OPEN, 
-                                        __Registers.FilePath = Path,
-                                        __Registers.Panel = Panel->Config->ID
-                                    );
-                                }
-
-                                ReleaseScratch(Scratch);
+                            AppRegistersScope(
+                                __Registers.Panel = Panel->Config->ID
+                            ) {
+                                AppOpenDroppedPaths(&Evt->Paths);
                             }
 
                             if (NeedDropCompletion)
@@ -19670,6 +19765,17 @@ AppWindowFrame(void)
                 }
             }
         }
+    }
+
+    // NOTE(nc): a drop that no panel took: on a tab bar, on the menu bar,
+    //         : or between two panels. a drop is taken anywhere on a
+    //         : window.
+    for (UIEvent* Evt = NULL; UINextEvent(&Evt); ) {
+        if (Evt->Kind != UI_EVENT_KIND_FILE_DROP)
+            continue;
+
+        AppOpenDroppedPaths(&Evt->Paths);
+        UIEatEvent(Evt);
     }
 
     // NOTE(nathan): Drag+drop cancelling
