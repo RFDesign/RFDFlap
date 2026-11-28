@@ -21,7 +21,8 @@ global const Str8 KEYWORDS[] = {
     Str8Lit("graph"),
     Str8Lit("table"),
     Str8Lit("write"),
-    Str8Lit("flag")
+    Str8Lit("flag"),
+    Str8Lit("map")
 };
 
 global const TokenKind KEYWORD_KINDS[] = {
@@ -33,7 +34,8 @@ global const TokenKind KEYWORD_KINDS[] = {
     TOKEN_KIND_GRAPH,
     TOKEN_KIND_TABLE,
     TOKEN_KIND_WRITE,
-    TOKEN_KIND_FLAG
+    TOKEN_KIND_FLAG,
+    TOKEN_KIND_MAP
 
 };
 

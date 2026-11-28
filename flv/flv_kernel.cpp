@@ -2540,6 +2540,33 @@ FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_FLAG)
         Flag->TotalDurationUSecs += Sel->V[Index].Max - Sel->V[Index].Min;
 }
 
+// NOTE(nc): the ranges of a map, as a flag has them. a map always has a
+//         : selection: one with none of its own has the whole flight.
+INTERNAL
+FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_MAP)
+{
+    u32 EmitIndex = FLVGetOperandIndex(Op.RHS);
+    FLVRenderItem* Item = &Lane->Items[EmitIndex];
+    FLVRenderMap* Map = &Item->Map;
+
+    if (FLVTempIsMissing(Lane, Op.LHS)) {
+        Item->IsMissing = TRUE;
+
+        return;
+    }
+
+    FLVSelection const* Sel = FLVSelectionPtr(Lane, Op.LHS);
+
+    Item->Kind = FLV_RENDER_KIND_MAP;
+    Map->Ranges = ArenaPushArray(
+        Lane->ResultMemPool,
+        r1u64,
+        Sel->Count
+    );
+    Map->Count = Sel->Count;
+    MemCpy(Map->Ranges, Sel->V, Sel->Count * sizeof(r1u64));
+}
+
 INTERNAL
 FLV_KERNEL_FUNC_SIG(FLVKernelEMIT_FLAG_SCALAR)
 {

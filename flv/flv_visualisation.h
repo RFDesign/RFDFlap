@@ -20,6 +20,7 @@ enum : u8 {
     FLV_RENDER_KIND_TABLE,
     FLV_RENDER_KIND_TEXT,
     FLV_RENDER_KIND_FLAG,
+    FLV_RENDER_KIND_MAP,
     FLV_RENDER_KIND_COUNT
 };
 
@@ -45,6 +46,11 @@ struct FLVRenderFlag {
     u64    TotalDurationUSecs;
     u32    LabelStringIndex;
     u32    __Padding;
+};
+
+struct FLVRenderMap {
+    r1u64* Ranges;
+    u64    Count;
 };
 
 struct FLVRenderTableColumn {
@@ -81,6 +87,7 @@ struct FLVRenderItem {
     union {
         FLVRenderCurve Curve;
         FLVRenderFlag  Flag;
+        FLVRenderMap   Map;
         FLVRenderTable Table;
         Str8           Text;
     };

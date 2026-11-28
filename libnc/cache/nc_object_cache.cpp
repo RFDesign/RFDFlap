@@ -88,16 +88,29 @@ OCNodeStoreValue(OCCache* Cache, Stripe* S, OCNode* Node, OCObject Value)
 }
 
 OCObject 
-__OCObjectFromKey(Access* Acc, Str8 Key, OCObjectParams* Params, u64 EndTimeUSecs)
-{
-    OCRequestBatch* RequestBatch = &OC_SHARED->RequestBatches[Params->Flags & OC_HIGH_PRIORITY ? 0 : 1];
+__OCObjectFromKey(
+    Access* Acc, 
+    Str8 Key, 
+    OCObjectParams* Params, 
+    u64 EndTimeUSecs
+) {
+    OCRequestBatch* RequestBatch = &OC_SHARED->RequestBatches[
+        !(Params->Flags & OC_HIGH_PRIORITY)
+    ];
     OCCache* Cache = NULL;
     u64 CacheHash = Hash(Str8Struct(&Params->CreateFunc));
     u64 CacheSlotIndex = CacheHash % OC_SHARED->CacheSlotsCount;
-    Stripe* CacheStripe = StripeFromSlotIndex(&OC_SHARED->CacheStripes, CacheSlotIndex);
+    Stripe* CacheStripe = StripeFromSlotIndex(
+        &OC_SHARED->CacheStripes, 
+        CacheSlotIndex
+    );
 
     LOCK_SCOPE_R(CacheStripe->RWMtx) {
-        for (OCCache* C = OC_SHARED->CacheSlots[CacheSlotIndex]; C; C = C->Next) {
+        for (
+            OCCache* C = OC_SHARED->CacheSlots[CacheSlotIndex]; 
+            C; 
+            C = C->Next
+        ) {
             if (C->CreateFunc == Params->CreateFunc) {
                 Cache = C;
                 break;
@@ -107,7 +120,11 @@ __OCObjectFromKey(Access* Acc, Str8 Key, OCObjectParams* Params, u64 EndTimeUSec
 
     if (!Cache) {
         LOCK_SCOPE_W(CacheStripe->RWMtx) {
-            for (OCCache* C = OC_SHARED->CacheSlots[CacheSlotIndex]; C; C = C->Next) {
+            for (
+                OCCache* C = OC_SHARED->CacheSlots[CacheSlotIndex]; 
+                C; 
+                C = C->Next
+            ) {
                 if (C->CreateFunc == Params->CreateFunc) {
                     Cache = C;
                     break;
@@ -148,10 +165,15 @@ __OCObjectFromKey(Access* Acc, Str8 Key, OCObjectParams* Params, u64 EndTimeUSec
                     MEM_ORDER_SEQ_CST
                 );
 
-                b32 IsStale = (Node->LastCompletedGeneration != Params->Generation);
+                b32 IsStale = (
+                    Node->LastCompletedGeneration != Params->Generation
+                );
 
                 if (
-                    AtomicLoadU64(&Node->CompletionCount, MEM_ORDER_SEQ_CST) && 
+                    AtomicLoadU64(
+                        &Node->CompletionCount, 
+                        MEM_ORDER_SEQ_CST
+                    ) && 
                     (
                         !IsStale || 
                         !(Params->Flags & OC_WAIT_FOR_FRESH)
@@ -223,18 +245,34 @@ __OCObjectFromKey(Access* Acc, Str8 Key, OCObjectParams* Params, u64 EndTimeUSec
                     NeedRequest = FALSE;
 
                     LOCK_SCOPE(RequestBatch->Mtx) {
-                        OCRequestNode* N = ArenaPushArrayZero(RequestBatch->MemPool, OCRequestNode, 1);
+                        OCRequestNode* N = ArenaPushArrayZero(
+                            RequestBatch->MemPool, 
+                            OCRequestNode, 
+                            1
+                        );
 
                         if (Params->Flags & OC_WIDE) {
-                            SLL_QUEUE_PUSH(RequestBatch->HeadWide, RequestBatch->TailWide, N);
+                            SLL_QUEUE_PUSH(
+                                RequestBatch->HeadWide, 
+                                RequestBatch->TailWide, 
+                                N
+                            );
                             ++RequestBatch->WideCount;
                         } else {
-                            SLL_QUEUE_PUSH(RequestBatch->HeadThin, RequestBatch->TailThin, N);
+                            SLL_QUEUE_PUSH(
+                                RequestBatch->HeadThin, 
+                                RequestBatch->TailThin, 
+                                N
+                            );
                             ++RequestBatch->ThinCount;
                         }
 
-                        N->V.Key = ArenaPushStrCpy(RequestBatch->MemPool, Key);
+                        N->V.Key = ArenaPushStrCpy(
+                            RequestBatch->MemPool, 
+                            Key
+                        );
                         N->V.Generation = Params->Generation;
+                        Node->Cancelled = FALSE;
                         N->V.CancelSignal = &Node->Cancelled;
                         N->V.CreateFunc = Params->CreateFunc;
                     }

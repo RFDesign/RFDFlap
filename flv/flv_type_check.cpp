@@ -1611,10 +1611,34 @@ CheckDisplay(CheckState* State, ASTNodeDisplay* Display, u32* ScopeKinds)
         TYPE_INDEX_INVALID_TYPE
     };
 
-    if (Kind != TOKEN_KIND_FLAG && Kind != TOKEN_KIND_WRITE) {
-        u32 Bit = 1U << (Kind - TOKEN_KIND_GRAPH);
+    // NOTE(nc): a map is next to the graphs of its analysis, or it is
+    //         : alone. it has a bit of its own, so it is not one of the
+    //         : kinds that an analysis holds only one of.
+    if (Kind == TOKEN_KIND_MAP) {
+        u32 TableBit = 1U << (TOKEN_KIND_TABLE - TOKEN_KIND_GRAPH);
 
-        if (*ScopeKinds && !(*ScopeKinds & Bit)) {
+        if (*ScopeKinds & CHECK_SCOPE_KIND_MAP) {
+            CHECK_ERROR(
+                State,
+                &Display->Header,
+                "an analysis can hold only one map"
+            );
+        }
+
+        if (*ScopeKinds & TableBit) {
+            CHECK_ERROR(
+                State,
+                &Display->Header,
+                "a map cannot share an analysis with a table; put the map in its own scope"
+            );
+        }
+
+        *ScopeKinds |= CHECK_SCOPE_KIND_MAP;
+    } else if (Kind != TOKEN_KIND_FLAG && Kind != TOKEN_KIND_WRITE) {
+        u32 Bit = 1U << (Kind - TOKEN_KIND_GRAPH);
+        u32 Kinds = *ScopeKinds & ~CHECK_SCOPE_KIND_MAP;
+
+        if (Kinds && !(Kinds & Bit)) {
             CHECK_ERROR(
                 State, 
                 &Display->Header, 
@@ -1622,11 +1646,22 @@ CheckDisplay(CheckState* State, ASTNodeDisplay* Display, u32* ScopeKinds)
             );
         }
 
-        if (Kind == TOKEN_KIND_TABLE && (*ScopeKinds & Bit)) {
+        if (Kind == TOKEN_KIND_TABLE && (Kinds & Bit)) {
             CHECK_ERROR(
                 State,
                 &Display->Header,
                 "an analysis can hold only one table; put each table in its own scope"
+            );
+        }
+
+        if (
+            Kind == TOKEN_KIND_TABLE &&
+            (*ScopeKinds & CHECK_SCOPE_KIND_MAP)
+        ) {
+            CHECK_ERROR(
+                State,
+                &Display->Header,
+                "a map cannot share an analysis with a table; put the map in its own scope"
             );
         }
 
@@ -1773,6 +1808,22 @@ CheckDisplay(CheckState* State, ASTNodeDisplay* Display, u32* ScopeKinds)
                         State,
                         ArgHeader,
                         "a write argument must be a single value"
+                    );
+                }
+            } break;
+
+            case TOKEN_KIND_MAP: {
+                if (Index) {
+                    CHECK_ERROR(
+                        State,
+                        ArgHeader,
+                        "map takes a selection, or nothing"
+                    );
+                } else if (!IsBoolSeries(Type) && !IsSelection(Type)) {
+                    CHECK_ERROR(
+                        State,
+                        ArgHeader,
+                        "the ranges of a map must be a selection or a boolean series"
                     );
                 }
             } break;

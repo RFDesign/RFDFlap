@@ -49,7 +49,7 @@ ExceptionFilter(PEXCEPTION_POINTERS ExceptionPtrs)
         *(FARPROC*) &DBGSymFunctionTableAccess64 = GetProcAddress(DBGHelp, "SymFunctionTableAccess64");
         *(FARPROC*) &DBGSymGetModuleBase64 = GetProcAddress(DBGHelp, "SymGetModuleBase64");
         *(FARPROC*) &DBGSymFromAddrW = GetProcAddress(DBGHelp, "SymFromAddrW");
-        *(FARPROC*) &DBGSymGetLineFromAddrW64 = GetProcAddress(DBGHelp, "SymGetLineAddrW64");
+        *(FARPROC*) &DBGSymGetLineFromAddrW64 = GetProcAddress(DBGHelp, "SymGetLineFromAddrW64");
         *(FARPROC*) &DBGSymGetModuleInfoW64 = GetProcAddress(DBGHelp, "SymGetModuleInfoW64");
         *(FARPROC*) &DBGMiniDumpWriteDump = GetProcAddress(DBGHelp, "MiniDumpWriteDump");
 

@@ -611,6 +611,17 @@ CLIDirectiveTail(FLVProgram const* P, u32 Head)
     return Result;
 }
 
+// NOTE(nc): a write goes to the file of its program, and a map has no
+//         : file yet, so neither has a file of its own.
+INTERNAL b32
+CLIDirectiveHasFile(FLVProgram const* P, u32 Head)
+{
+    u8 Kind = P->Emits[Head].DisplayKind;
+    b32 Result = (Kind != TOKEN_KIND_WRITE && Kind != TOKEN_KIND_MAP);
+
+    return Result;
+}
+
 INTERNAL Str8
 CLIFileNameFromLabel(Arena* MemPool, Str8 Label)
 {
@@ -693,7 +704,7 @@ CLIScriptNames(Arena* MemPool, CLIScript* Script)
         ) {
             u8 Kind = P->Emits[Head].DisplayKind;
 
-            if (Kind == TOKEN_KIND_WRITE)
+            if (!CLIDirectiveHasFile(P, Head))
                 continue;
 
             if (Kind == TOKEN_KIND_TABLE) {
@@ -909,7 +920,7 @@ CLIProgramIsFresh(
         Result && Head < P->EmitCount;
         Head = CLIDirectiveTail(P, Head), ++Ordinal
     ) {
-        if (P->Emits[Head].DisplayKind == TOKEN_KIND_WRITE)
+        if (!CLIDirectiveHasFile(P, Head))
             continue;
 
         FileProperties Props = SystemGetFileProperties(
@@ -3078,8 +3089,9 @@ CLIRunFlights(Arena* MemPool)
             for (u32 Head = 0; Head < P->EmitCount; ++Ordinal) {
                 u32 Tail = CLIDirectiveTail(P, Head);
 
-                // NOTE(nc): the writes go to the file of the program
-                if (P->Emits[Head].DisplayKind == TOKEN_KIND_WRITE) {
+                // NOTE(nc): the writes go to the file of the program,
+                //         : and a map has no file
+                if (!CLIDirectiveHasFile(P, Head)) {
                     Head = Tail;
                     continue;
                 }

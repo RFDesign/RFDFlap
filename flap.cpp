@@ -3635,7 +3635,11 @@ ASYNC_THREAD_FUNC_SIG(EntryPoint)
         FSAsyncTick();
         LogAsyncTick();
         FLIAsyncTick();
-        // HTTPAsyncTick();
+
+    #if defined(NC_OS_WIN) && !defined(NC_CLI) && !defined(NC_FLI)
+        HTTPAsyncTick();
+    #endif
+
         LaneSync();
 
         b32 ShouldQuit = FALSE;
@@ -3661,7 +3665,12 @@ EntryPoint(CommandLine* CLI)
     CLIEntryPoint(CLI);
 #else
     // SockInit();
-    // HTTPInit();
+
+#if defined (NC_OS_WIN)
+    HTTPInit();
+    FLAPMapInit();
+#endif
+
     MDInit();
     ConfigInit();
     FLVCompilerInit();

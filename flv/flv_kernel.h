@@ -229,6 +229,7 @@ enum : u16 {
     X(EMIT_WRITE_NONE,     0, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
     X(EMIT_WRITE,          0, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
     X(EMIT_WRITE_ROWS,     1, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
+    X(EMIT_MAP,            1, NONE,       FLV_KERNEL_FLAG_SCALAR | FLV_KERNEL_FLAG_EMIT)                          \
 
 #define X(Name, Inputs, Dst, Flags) FLV_KERNEL_##Name,
 

@@ -242,6 +242,31 @@ FLAPToolButton(
 }
 
 INTERNAL void
+FLAPAnalysisMap(
+    FLAPViewTabCtx* Ctx,
+    u32 NodeIndex,
+    FLVRenderItem* Items,
+    u32 MapEmit,
+    r2f32 Rect
+) {
+    FLAPViewTabState* State = Ctx->State;
+    FLAPMapParams Params = {};
+
+    Params.Acc = Ctx->Acc;
+    Params.FLI = Ctx->FLI;
+    Params.Map = &Items[MapEmit].Map;
+    Params.Graph = &State->Graph;
+    Params.State = &State->Maps[NodeIndex];
+    Params.UnitHash = Ctx->Unit->Hash;
+    Params.Flight = Ctx->Keys[Ctx->Flight];
+    Params.Key = NodeIndex;
+    Params.LineWidth = FLAPGraphMetricsFromFontSize(
+        UIHeadFontSize()
+    ).LineWidth;
+    FLAPMap(&Params, Rect);
+}
+
+INTERNAL void
 FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
 {
     FLVLayoutNode const* Node = &Ctx->Unit->Lowered.Layout[NodeIndex];
@@ -260,6 +285,7 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
         0
     );
     u32 TableEmit = U32_MAX;
+    u32 MapEmit = U32_MAX;
     u32 FlagCount = 0;
     u32 CurveCount = 0;
 
@@ -285,6 +311,15 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                 ++FlagCount;
 
             if (
+                Kind == TOKEN_KIND_MAP &&
+                MapEmit == U32_MAX &&
+                !Items[Index].IsMissing &&
+                Items[Index].Kind == FLV_RENDER_KIND_MAP
+            ) {
+                MapEmit = Index;
+            }
+
+            if (
                 Kind == TOKEN_KIND_GRAPH &&
                 !Items[Index].IsMissing &&
                 Items[Index].Kind == FLV_RENDER_KIND_CURVE
@@ -296,6 +331,7 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
 
     b32 IsGraph = (CurveCount != 0);
     b32 IsTable = (!IsGraph && TableEmit != U32_MAX);
+    b32 IsMap = (MapEmit != U32_MAX);
 
     UISetNextChildLayoutAxis(AXIS_2D_Y);
 
@@ -445,6 +481,15 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
             }
         }
 
+        // NOTE(nc): a map has the lower half of an analysis that has a
+        //         : graph, and all of one that has none
+        r2f32 MapRect = Rect;
+
+        if (IsMap && IsGraph) {
+            MapRect.Y0 = FloorF32(0.5f * (Rect.Y0 + Rect.Y1));
+            Rect.Y1 = MapRect.Y0;
+        }
+
         if (!Items) {
             UITag("weak"_s8) {
                 UIWidthFill() {
@@ -480,6 +525,11 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                 UIHeadFontSize()
             );
             FLAPGraph(&Params, Rect);
+
+            if (IsMap)
+                FLAPAnalysisMap(Ctx, NodeIndex, Items, MapEmit, MapRect);
+        } else if (IsMap) {
+            FLAPAnalysisMap(Ctx, NodeIndex, Items, MapEmit, MapRect);
         } else if (IsTable) {
             FLAPTableParams Params = {};
 

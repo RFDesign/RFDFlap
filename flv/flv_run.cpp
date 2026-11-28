@@ -816,6 +816,20 @@ FLVRenderItemsPrint(
                 }
             } break;
 
+            case FLV_RENDER_KIND_MAP: {
+                ListPush(
+                    MemPool,
+                    &Result,
+                    ArenaPushStrFmt(
+                        MemPool,
+                        "  emit %u \"%S\": map, %llu ranges",
+                        Index,
+                        PRINT_STR(Label),
+                        Item->Map.Count
+                    )
+                );
+            } break;
+
             case FLV_RENDER_KIND_TABLE: {
                 FLVRenderTable const* Table = &Item->Table;
                 u64 Row0 = FLVSeriesFirstSet(Table->Mask, Table->SampleCount);

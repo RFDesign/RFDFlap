@@ -119,7 +119,7 @@ goto :invalid_mode
 
 :build_release
     echo.[33m____building_release_________[0m
-    set ConfigCompilerFlags=/O2 /Oi /Os /GL /Gy /GF /GA /Ob3 /Qpar /Qvec-report:2 /DNDEBUG /DNC_ARENA_STATS=1
+    set ConfigCompilerFlags=/O2 /Oi /Os /GL /Gy /GF /GA /Ob3 /Qpar /Qvec-report:2 /DNC_DEBUG=1 /Zi
     set ConfigLinkerFlags=/LTCG /NOCOFFGRPINFO /EMITTOOLVERSIONINFO:NO /OPT:REF /OPT:ICF /INCREMENTAL:NO
     set PostBuildCmd=%OutputExe%
     goto :build

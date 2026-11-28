@@ -1,6 +1,8 @@
 #include "nc_arena.h"
 #include "nc_application.h"
+#include "nc_atomics.h"
 #include "nc_draw.h"
+#include "nc_http.h"
 #include "nc_memory.h"
 #include "nc_ui_components.h"
 #include "nc_render.h"
@@ -3117,5 +3119,1233 @@ FLAPGraph(FLAPGraphParams* Params, r2f32 Rect)
                 AppRequestFrame();
             }
         }
+    }
+}
+
+// NOTE(nc): the messages that have a position, in the order that the map
+//         : takes them. the first one that the flight has is the track.
+global const Str8 FLAP_MAP_SOURCE_TABLE[] = {
+    Str8Lit("POS"),
+    Str8Lit("GPS")
+};
+
+// NOTE(nc): the imagery of the map: its name in the cache, its URL, its
+//         : finest level and its count of servers. the URL takes the
+//         : server, the X, the Y and the level of a tile. the tiles are
+//         : 256 pixels, in the Mercator of the web.
+global const FLAPMapImagery FLAP_MAP_IMAGERY = {
+    Str8Lit("google_s"),
+    "https://mt%u.google.com/vt/lyrs=s&x=%u&y=%u&z=%u",
+    20,
+    4
+};
+
+global FLAPMapShared* FLAP_MAP_SHARED = NULL;
+
+INTERNAL void*
+FLAPMapImageRealloc(void* Ptr, u64 OldSize, u64 NewSize)
+{
+    void* Result = ArenaPushSize(
+        GetTLS()->FLAP_MAP_IMAGE_MEMPOOL,
+        NewSize,
+        16,
+        FALSE
+    );
+
+    if (Ptr)
+        MemCpy(Result, Ptr, MIN(OldSize, NewSize));
+
+    return Result;
+}
+
+#if !defined(STBI_INCLUDE_STB_IMAGE_H)
+    #define STBI_NO_STDIO
+    #define STBI_NO_HDR
+    #define STBI_NO_LINEAR
+    #define STBI_NO_THREAD_LOCALS
+    #define STBI_ONLY_JPEG
+    #define STB_IMAGE_STATIC
+    #define STBI_ASSERT(X)                            ASSERT(X)
+    #define STBI_MALLOC(Size)                         FLAPMapImageRealloc(NULL, 0, (u64) (Size))
+    #define STBI_REALLOC_SIZED(Ptr, OldSize, NewSize) FLAPMapImageRealloc((Ptr), (u64) (OldSize), (u64) (NewSize))
+    #define STBI_FREE(Ptr)                            ((void) (Ptr))
+    #define STB_IMAGE_IMPLEMENTATION
+    #include "stb_image.h"
+#endif
+
+void
+FLAPMapInit(void)
+{
+    Arena* MemPool = ArenaAlloc();
+
+    FLAP_MAP_SHARED = ArenaPushArrayZero(MemPool, FLAPMapShared, 1);
+    FLAP_MAP_SHARED->MemPool = MemPool;
+    FLAP_MAP_SHARED->Mtx = MutexAlloc();
+    FLAP_MAP_SHARED->Ring = SafeByteRingAlloc(
+        MemPool,
+        FLAP_MAP_FETCH_RING_SIZE
+    );
+    FLAP_MAP_SHARED->CachePath = ArenaPushStrFmt(
+        MemPool,
+        "%S/%s/map",
+        PRINT_STR(GetProcessProperties()->UserProgramDataPath),
+        NC_DATA_DIR
+    );
+    SystemCreateDirectory(FLAP_MAP_SHARED->CachePath);
+}
+
+INTERNAL Str8
+FLAPMapTileName(Arena* MemPool, FLAPMapTileKey const* Key)
+{
+    Str8 Result = ArenaPushStrFmt(
+        MemPool,
+        "%S_%u_%u_%u.jpg",
+        PRINT_STR(FLAP_MAP_IMAGERY.Name),
+        Key->Level,
+        Key->X,
+        Key->Y
+    );
+
+    return Result;
+}
+
+INTERNAL Str8
+FLAPMapTileURL(Arena* MemPool, FLAPMapTileKey const* Key)
+{
+    Str8 Result = ArenaPushStrFmt(
+        MemPool,
+        FLAP_MAP_IMAGERY.URL,
+        (Key->X + 2 * Key->Y) % FLAP_MAP_IMAGERY.Servers,
+        Key->X,
+        Key->Y,
+        Key->Level
+    );
+
+    return Result;
+}
+
+// NOTE(nc): the Y of a latitude in the Mercator of the web, from 0 at
+//         : the top of the world to 1 at its bottom, and the latitude of
+//         : a Y
+INTERNAL f64
+FLAPMapMercatorFromLatitude(f64 Latitude)
+{
+    f64 Result = 0.5 - LnF64(
+        TanF64(0.25 * NC_PI + 0.5 * RADFromDEG(Latitude))
+    ) / (2.0 * NC_PI);
+
+    return Result;
+}
+
+INTERNAL f64
+FLAPMapLatitudeFromMercator(f64 Y)
+{
+    f64 Result = (
+        2.0 * ArcTanF64(ExpF64(NC_PI * (1.0 - 2.0 * Y))) -
+        0.5 * NC_PI
+    ) * (180.0 / NC_PI);
+
+    return Result;
+}
+
+#if defined(NC_OS_WIN)
+
+// NOTE(nc): the responses that are in the ring, each to the file of its
+//         : fetch. the file is made with another name and moved, so a
+//         : file with the name of a tile is a whole tile. a tile that
+//         : the server does not have is a file of one byte, so it is
+//         : not asked for again. any other response is a fetch that
+//         : failed. the mutex of the map is held.
+INTERNAL void
+FLAPMapFetchDrain(Arena* MemPool)
+{
+    FLAPMapShared* Shared = FLAP_MAP_SHARED;
+    HTTPResponse Response = {};
+
+    for (
+        ;
+        HTTPPopResponse(MemPool, Shared->Ring, &Response, 0);
+        Response = {}
+    ) {
+        FLAPMapFetch* Fetch = NULL;
+
+        for (u32 Index = 0; Index < FLAP_MAP_FETCH_SLOTS; ++Index) {
+            FLAPMapFetch* Slot = &Shared->Fetches[Index];
+
+            if (
+                Slot->Status == FLAP_MAP_FETCH_STATUS_PENDING &&
+                Slot->ID == Response.ID
+            ) {
+                Fetch = Slot;
+                break;
+            }
+        }
+
+        if (!Fetch)
+            continue;
+
+        b32 IsTile = (
+            Response.Code == HTTP_STATUS_CODE_OK &&
+            Response.Body.Size > 1 &&
+            !Response.HasExtra &&
+            (
+                !Response.EndOffset ||
+                Response.Body.Size == Response.EndOffset
+            )
+        );
+        b32 IsWritten = FALSE;
+
+        if (IsTile || (u32) Response.Code == 404) {
+            Str8 Path = ArenaPushStrFmt(
+                MemPool,
+                "%S/%S",
+                PRINT_STR(Shared->CachePath),
+                PRINT_STR(Str(Fetch->Name, Fetch->NameSize))
+            );
+            Str8 TempPath = ArenaPushStrFmt(
+                MemPool,
+                "%S.tmp",
+                PRINT_STR(Path)
+            );
+
+            IsWritten = (
+                WriteFileContents(
+                    TempPath,
+                    IsTile
+                        ? Response.Body
+                        : "0"_s8
+                ) &&
+                SystemMoveFile(Path, TempPath)
+            );
+        }
+
+        Fetch->Status = IsWritten
+            ? FLAP_MAP_FETCH_STATUS_NULL
+            : FLAP_MAP_FETCH_STATUS_FAILED;
+    }
+}
+
+// NOTE(nc): the texture of a tile is an object of the cache, as the
+//         : texture of a minimap is. a tile that is not on the disk is
+//         : asked for, and the object is tried again until the tile is
+//         : on the disk or its fetch has failed. the retry of the cache
+//         : does not sleep, so the wait is here, one time for all the
+//         : tiles that wait. this runs on an async lane.
+OCObject
+FLAPMapTileObjectCreate(
+    Str8 Key,
+    b32* CancelSignal,
+    OUT b32* Retry,
+    OUT u64* Generation
+) {
+    OCObject Result = {};
+    FLAPMapShared* Shared = FLAP_MAP_SHARED;
+    TempArena Scratch = GetScratch(NULL, 0);
+    FLAPMapTileKey Head = {};
+    b32 IsWaiting = FALSE;
+
+    MemCpy(&Head, Key.Str, sizeof(Head));
+
+    Str8 Name = FLAPMapTileName(Scratch.MemPool, &Head);
+    Str8 Path = ArenaPushStrFmt(
+        Scratch.MemPool,
+        "%S/%S",
+        PRINT_STR(Shared->CachePath),
+        PRINT_STR(Name)
+    );
+    u64 ID = Hash(Name.Str, Name.Size);
+
+    ASSERT_ALWAYS(Name.Size <= FLAP_MAP_TILE_NAME_MAX);
+
+    LOCK_SCOPE(Shared->Mtx) {
+        FLAPMapFetchDrain(Scratch.MemPool);
+
+        if (!SystemFileExists(Path)) {
+            FLAPMapFetch* Fetch = NULL;
+            FLAPMapFetch* Free = NULL;
+            u64 Now = TimeNow();
+
+            // NOTE(nc): a fetch with no answer in time has failed. a
+            //         : slot with no fetch is taken first, and then one
+            //         : whose fetch failed.
+            for (u32 Index = 0; Index < FLAP_MAP_FETCH_SLOTS; ++Index) {
+                FLAPMapFetch* Slot = &Shared->Fetches[Index];
+
+                if (
+                    Slot->Status == FLAP_MAP_FETCH_STATUS_PENDING &&
+                    Now >= Slot->EndTimeUSecs
+                ) {
+                    Slot->Status = FLAP_MAP_FETCH_STATUS_FAILED;
+                }
+
+                if (Slot->Status && Slot->ID == ID) {
+                    Fetch = Slot;
+                    break;
+                }
+
+                if (
+                    Slot->Status != FLAP_MAP_FETCH_STATUS_PENDING &&
+                    (!Free || (Free->Status && !Slot->Status))
+                ) {
+                    Free = Slot;
+                }
+            }
+
+            if (!Fetch && Free) {
+                HTTPRequestParams Request = {};
+
+                Request.ID = ID;
+                Request.Method = HTTP_METHOD_KIND_GET;
+                Request.URL = FLAPMapTileURL(Scratch.MemPool, &Head);
+                Request.UserAgent = "FLAP"_s8;
+
+                if (HTTPPushRequest(Shared->Ring, &Request, 0)) {
+                    Free->ID = ID;
+                    Free->EndTimeUSecs = Now + FLAP_MAP_FETCH_TIMEOUT_USECS;
+                    Free->NameSize = Name.Size;
+                    Free->Status = FLAP_MAP_FETCH_STATUS_PENDING;
+                    MemCpy(Free->Name, Name.Str, Name.Size);
+                    Fetch = Free;
+                }
+            }
+
+            IsWaiting = (
+                !Fetch ||
+                Fetch->Status == FLAP_MAP_FETCH_STATUS_PENDING
+            );
+
+            if (IsWaiting && Now >= Shared->NextWaitUSecs) {
+                SleepMSecs(1);
+                Shared->NextWaitUSecs = TimeNow() + THOUSAND(1);
+            }
+        }
+    }
+
+    // NOTE(nc): the cache does not ask again for an object that is
+    //         : cancelled, so it is done here, with a generation that
+    //         : no one asks for. a view that sees it again asks again.
+    if (AtomicLoadU32(CancelSignal, MEM_ORDER_SEQ_CST)) {
+        *Generation = 1;
+    } else if (IsWaiting) {
+        *Retry = TRUE;
+    } else {
+        Str8 File = ReadFileContents(Scratch.MemPool, Path);
+        u8* Tile = NULL;
+        int TileWidth = 0;
+        int TileHeight = 0;
+        int Components = 0;
+
+        if (File.Size > 1) {
+            GetTLS()->FLAP_MAP_IMAGE_MEMPOOL = Scratch.MemPool;
+            Tile = stbi_load_from_memory(
+                File.Str,
+                (int) File.Size,
+                &TileWidth,
+                &TileHeight,
+                &Components,
+                4
+            );
+            GetTLS()->FLAP_MAP_IMAGE_MEMPOOL = NULL;
+        }
+
+        if (
+            Tile &&
+            TileWidth == FLAP_MAP_TILE_SIZE &&
+            TileHeight == FLAP_MAP_TILE_SIZE
+        ) {
+            RendHandle Texture = Tex2DAlloc(
+                RESOURCE_KIND_STATIC,
+                Vec((i32) FLAP_MAP_TILE_SIZE, (i32) FLAP_MAP_TILE_SIZE),
+                TEX2D_FMT_RGBA8,
+                Tile
+            );
+
+            Result.V[0] = Texture.U64[0];
+        } else if (File.Size > 1) {
+            // NOTE(nc): a file that is not a tile is fetched again the
+            //         : next time
+            SystemDeleteFile(Path);
+        }
+
+        // NOTE(nc): V[1] says that the object is done, with a texture
+        //         : or with none
+        Result.V[1] = 1;
+    }
+
+    ReleaseScratch(Scratch);
+
+    return Result;
+}
+
+void
+FLAPMapTileObjectDestroy(OCObject Object)
+{
+    RendHandle Texture = {};
+
+    Texture.U64[0] = Object.V[0];
+
+    if (Object.V[0])
+        Tex2DRelease(Texture);
+}
+
+#endif
+
+// NOTE(nc): a build with no HTTP has no tiles, and its object is done
+INTERNAL OCObject
+FLAPMapTileObject(Access* Acc, FLAPMapTileKey* Key)
+{
+    OCObject Result = {};
+
+    Result.V[1] = 1;
+
+#if defined(NC_OS_WIN)
+    if (FLAP_MAP_SHARED) {
+        Result = OCObjectFromKey(
+            Acc,
+            Str8Struct(Key),
+            FLAPMapTileObjectCreate,
+            FLAPMapTileObjectDestroy,
+            0
+        );
+    }
+#endif
+
+    return Result;
+}
+
+// NOTE(nc): the imagery under the map: the tiles that the camera sees,
+//         : at the level at which a pixel of a tile is nearest to a
+//         : pixel of the screen. a tile is a rect from the latitude and
+//         : longitude of its edges, which N and E are flat in, so it is
+//         : under the track at any size of the view. a tile with no
+//         : texture yet is drawn from the part of a parent that it is.
+//         : the result is FALSE when a tile of the level is not done.
+INTERNAL b32
+FLAPMapTiles(FLAPMapParams* Params, FLAPMapDrawData* Data, r2f32 Local)
+{
+    FLAPMapState* State = Params->State;
+    u64 InfosCount = 0;
+    FLIFileInfo* Infos = FLITableFromName(
+        Params->FLI,
+        FileInfo,
+        FILE_INFO,
+        &InfosCount
+    );
+    b32 Result = TRUE;
+
+    if (!InfosCount || !State->IsFitted)
+        return Result;
+
+    FLIFileInfo* Info = &Infos[InfosCount - 1];
+
+    if (Info->OriginKind == FLI_ORIGIN_KIND_NULL)
+        return Result;
+
+    f64 NorthPerDegree = RADFromDEG(1.0) * FLAP_MAP_EARTH_RADIUS_METRES;
+    f64 EastPerDegree = NorthPerDegree * CosF64(RADFromDEG(Info->OriginLat));
+    f64 MetresPerPX = State->MetresPerPX;
+    f64 MidX = 0.5 * (f64) (Local.X1 - Local.X0);
+    f64 MidY = 0.5 * (f64) (Local.Y1 - Local.Y0);
+    f64 West = MAX(
+        Info->OriginLng + (
+            State->CentreEast - MidX * MetresPerPX
+        ) / EastPerDegree,
+        -180.0
+    );
+    f64 East = MIN(
+        Info->OriginLng + (
+            State->CentreEast + MidX * MetresPerPX
+        ) / EastPerDegree,
+        180.0
+    );
+    f64 North = MIN(
+        Info->OriginLat + (
+            State->CentreNorth + MidY * MetresPerPX
+        ) / NorthPerDegree,
+        FLAP_MAP_LATITUDE_MAX
+    );
+    f64 South = MAX(
+        Info->OriginLat + (
+            State->CentreNorth - MidY * MetresPerPX
+        ) / NorthPerDegree,
+        -FLAP_MAP_LATITUDE_MAX
+    );
+
+    if (West >= East || South >= North)
+        return Result;
+
+    f64 Left = (West + 180.0) / 360.0;
+    f64 Right = (East + 180.0) / 360.0;
+    f64 Top = FLAPMapMercatorFromLatitude(North);
+    f64 Bottom = FLAPMapMercatorFromLatitude(South);
+    f64 WorldPX = 360.0 * EastPerDegree / MetresPerPX;
+    u32 Level = 0;
+    u32 X0 = 0;
+    u32 X1 = 0;
+    u32 Y0 = 0;
+    u32 Y1 = 0;
+
+    // NOTE(nc): the first level at which a tile is less than the root
+    //         : of 2 of its size on the screen
+    for ( ; Level < FLAP_MAP_IMAGERY.Level; ++Level) {
+        if (
+            WorldPX / (f64) (1ULL << Level) <
+            1.41421356 * (f64) FLAP_MAP_TILE_SIZE
+        ) {
+            break;
+        }
+    }
+
+    // NOTE(nc): a view with too many tiles has a level less
+    for ( ; ; --Level) {
+        f64 Count = (f64) (1ULL << Level);
+
+        X0 = (u32) MIN(Left * Count, Count - 1.0);
+        X1 = (u32) MIN(Right * Count, Count - 1.0);
+        Y0 = (u32) MIN(Top * Count, Count - 1.0);
+        Y1 = (u32) MIN(Bottom * Count, Count - 1.0);
+
+        if (
+            !Level ||
+            (u64) (X1 - X0 + 1) * (u64) (Y1 - Y0 + 1) <= FLAP_MAP_TILES_MAX
+        ) {
+            break;
+        }
+    }
+
+    f64 Count = (f64) (1ULL << Level);
+
+    Data->Images = ArenaPushArray(
+        UIBuildMemPool(),
+        FLAPMapImage,
+        (u64) (X1 - X0 + 1) * (u64) (Y1 - Y0 + 1)
+    );
+
+    // NOTE(nc): the edges are on whole pixels, and two tiles that touch
+    //         : have the same edge, so there is no gap between them
+    for (u32 Y = Y0; Y <= Y1; ++Y) {
+        f64 TileNorth = FLAPMapLatitudeFromMercator((f64) Y / Count);
+        f64 TileSouth = FLAPMapLatitudeFromMercator((f64) (Y + 1) / Count);
+        f32 DstY0 = FloorF32(
+            (f32) (
+                MidY - (
+                    (TileNorth - Info->OriginLat) * NorthPerDegree -
+                    State->CentreNorth
+                ) / MetresPerPX
+            )
+        );
+        f32 DstY1 = FloorF32(
+            (f32) (
+                MidY - (
+                    (TileSouth - Info->OriginLat) * NorthPerDegree -
+                    State->CentreNorth
+                ) / MetresPerPX
+            )
+        );
+
+        for (u32 X = X0; X <= X1; ++X) {
+            f64 TileWest = (f64) X / Count * 360.0 - 180.0;
+            f64 TileEast = (f64) (X + 1) / Count * 360.0 - 180.0;
+            f32 DstX0 = FloorF32(
+                (f32) (
+                    MidX + (
+                        (TileWest - Info->OriginLng) * EastPerDegree -
+                        State->CentreEast
+                    ) / MetresPerPX
+                )
+            );
+            f32 DstX1 = FloorF32(
+                (f32) (
+                    MidX + (
+                        (TileEast - Info->OriginLng) * EastPerDegree -
+                        State->CentreEast
+                    ) / MetresPerPX
+                )
+            );
+
+            // NOTE(nc): the tile, and then its parents. a parent is
+            //         : asked for only while the tile has no texture.
+            for (
+                u32 Up = 0;
+                Up <= FLAP_MAP_TILE_PARENTS && Up <= Level;
+                ++Up
+            ) {
+                FLAPMapTileKey Key = {};
+
+                Key.Level = Level - Up;
+                Key.X = X >> Up;
+                Key.Y = Y >> Up;
+
+                OCObject Object = FLAPMapTileObject(Params->Acc, &Key);
+
+                if (!Up)
+                    Result &= (Object.V[1] != 0);
+
+                if (!Object.V[0])
+                    continue;
+
+                FLAPMapImage* Image = &Data->Images[Data->ImagesCount++];
+                f32 Size = (f32) (FLAP_MAP_TILE_SIZE >> Up);
+                f32 SrcX = (f32) (X & ((1U << Up) - 1)) * Size;
+                f32 SrcY = (f32) (Y & ((1U << Up) - 1)) * Size;
+
+                Image->Texture.U64[0] = Object.V[0];
+                Image->Dst = Rng(DstX0, DstY0, DstX1, DstY1);
+                Image->Src = Rng(SrcX, SrcY, SrcX + Size, SrcY + Size);
+
+                break;
+            }
+        }
+    }
+
+    return Result;
+}
+
+INTERNAL
+UI_BOX_CUSTOM_DRAW(FLAPMapDraw)
+{
+    FLAPMapDrawData* Data = (FLAPMapDrawData*) UserData;
+
+    if (
+        !Data->SegmentsCount &&
+        !Data->LegsCount &&
+        !Data->WaypointsCount &&
+        !Data->ImagesCount
+    ) {
+        return;
+    }
+
+    f32 X0 = FloorF32(Box->Rect.X0);
+    f32 Y0 = FloorF32(Box->Rect.Y0);
+    r2f32 Clip = Intersect(DTopClip(), Box->Rect);
+
+    DClipScope(Clip) {
+        // NOTE(nc): the imagery is rects of the UI pass, so the CAD pass
+        //         : draws the mission and the track over it
+        DEFER(
+            DPushTex2DSampleKind(TEX2D_SAMPLE_LINEAR),
+            DPopTex2DSampleKind()
+        ) {
+            for (u64 Index = 0; Index < Data->ImagesCount; ++Index) {
+                FLAPMapImage* Image = &Data->Images[Index];
+
+                DrawImage(
+                    Rng(
+                        X0 + Image->Dst.X0,
+                        Y0 + Image->Dst.Y0,
+                        X0 + Image->Dst.X1,
+                        Y0 + Image->Dst.Y1
+                    ),
+                    Image->Src,
+                    Image->Texture,
+                    Vec(1.0f, 1.0f, 1.0f, 1.0f),
+                    0.0f,
+                    0.0f,
+                    0.0f
+                );
+            }
+        }
+
+        RendPassCADParams* Pass = DrawCADBegin(
+            Box->Rect,
+            Mat3(1.0f),
+            Mat3(1.0f)
+        );
+
+        Pass->Clip = Clip;
+
+        // NOTE(nc): the mission is drawn first, so the track is over it
+        for (u64 Index = 0; Index < Data->LegsCount; ++Index) {
+            FLAPMapSegment Leg = Data->Legs[Index];
+
+            DrawCADLine(
+                Vec(X0 + Leg.From.X, Y0 + Leg.From.Y),
+                Vec(X0 + Leg.To.X, Y0 + Leg.To.Y),
+                Data->MissionColour,
+                Data->LineWidth,
+                1.0f,
+                CAD_LINE_CAP_ROUND
+            );
+        }
+
+        for (u64 Index = 0; Index < Data->WaypointsCount; ++Index) {
+            v2f32 Waypoint = Data->Waypoints[Index];
+
+            DrawCADCircle(
+                Vec(X0 + Waypoint.X, Y0 + Waypoint.Y),
+                Data->WaypointRadius,
+                Data->MissionColour,
+                Data->LineWidth,
+                1.0f
+            );
+        }
+
+        for (u64 Index = 0; Index < Data->SegmentsCount; ++Index) {
+            FLAPMapSegment Segment = Data->Segments[Index];
+
+            DrawCADLine(
+                Vec(X0 + Segment.From.X, Y0 + Segment.From.Y),
+                Vec(X0 + Segment.To.X, Y0 + Segment.To.Y),
+                Data->Colour,
+                Data->LineWidth,
+                1.0f,
+                CAD_LINE_CAP_ROUND
+            );
+        }
+    }
+}
+
+// NOTE(nc): the waypoints of the mission and the legs between them. a
+//         : command is logged when it is sent and again when it starts,
+//         : so the last record of a number is the one that is kept. only
+//         : a navigation command with a position of its own is a
+//         : waypoint: the N and E of a command with none are those of
+//         : the record before it. the legs are in the order of the
+//         : numbers. the result is FALSE when a column is not loaded yet.
+INTERNAL b32
+FLAPMapMission(FLAPMapParams* Params, FLAPMapDrawData* Data, r2f32 Local)
+{
+    FLAPMapState* State = Params->State;
+    Arena* BuildMemPool = UIBuildMemPool();
+    Str8 Names[] = {
+        "CNum"_s8,
+        "CId"_s8,
+        "Lat"_s8,
+        "Lng"_s8,
+        "N"_s8,
+        "E"_s8
+    };
+    FLVColumn Columns[ARRAY_COUNT(Names)] = {};
+    FLVColumn const* Numbers = &Columns[0];
+    FLVColumn const* IDs = &Columns[1];
+    FLVColumn const* Lats = &Columns[2];
+    FLVColumn const* Lngs = &Columns[3];
+    FLVColumn const* Norths = &Columns[4];
+    FLVColumn const* Easts = &Columns[5];
+    u64 Count = U64_MAX;
+    b32 HasMission = TRUE;
+    b32 Result = TRUE;
+
+    for (u32 Index = 0; Index < ARRAY_COUNT(Names); ++Index) {
+        u32 Column = FLIColumnIndexFromNames(
+            Params->FLI,
+            "CMD"_s8,
+            Names[Index]
+        );
+
+        if (!Column) {
+            HasMission = FALSE;
+            break;
+        }
+
+        Result &= FLVColumnInit(
+            Params->Acc,
+            Params->Flight,
+            Params->FLI,
+            Column,
+            0,
+            &Columns[Index]
+        );
+        Count = MIN(Count, Columns[Index].Count);
+    }
+
+    if (!HasMission || !Result || !Count || !State->IsFitted)
+        return Result;
+
+    TempArena Scratch = GetScratch(&BuildMemPool, 1);
+    u32 MaxNumber = 0;
+
+    for (u64 Index = 0; Index < Count; ++Index) {
+        MaxNumber = MAX(
+            MaxNumber,
+            (u32) FLVColumnF64At(Numbers, Index)
+        );
+    }
+
+    u64 SlotsCount = (u64) MaxNumber + 1;
+    u32* Records = ArenaPushArray(Scratch.MemPool, u32, SlotsCount);
+    u64 Located = 0;
+
+    MemSet(Records, 0xFF, SlotsCount * sizeof(u32));
+
+    for (u64 Index = 0; Index < Count; ++Index) {
+        u32 Number = (u32) FLVColumnF64At(Numbers, Index);
+        b32 IsWaypoint = (
+            FLVColumnF64At(IDs, Index) <= (f64) FLAP_MAP_CMD_NAV_LAST &&
+            (
+                FLVColumnF64At(Lats, Index) != 0.0 ||
+                FLVColumnF64At(Lngs, Index) != 0.0
+            )
+        );
+
+        Records[Number] = IsWaypoint
+            ? (u32) Index
+            : U32_MAX;
+    }
+
+    for (u64 Number = 0; Number < SlotsCount; ++Number)
+        Located += (Records[Number] != U32_MAX);
+
+    if (Located) {
+        f64 PXPerMetre = 1.0 / State->MetresPerPX;
+        f64 MidX = 0.5 * (f64) (Local.X1 - Local.X0);
+        f64 MidY = 0.5 * (f64) (Local.Y1 - Local.Y0);
+        f64 Pad = (f64) (Data->WaypointRadius + Data->LineWidth);
+        f64 PrevX = 0.0;
+        f64 PrevY = 0.0;
+        b32 HasPrev = FALSE;
+
+        Data->Waypoints = ArenaPushArray(BuildMemPool, v2f32, Located);
+        Data->Legs = ArenaPushArray(BuildMemPool, FLAPMapSegment, Located);
+
+        for (u64 Number = 0; Number < SlotsCount; ++Number) {
+            u32 Record = Records[Number];
+
+            if (Record == U32_MAX)
+                continue;
+
+            f64 X = MidX + (
+                FLVColumnF64At(Easts, Record) - State->CentreEast
+            ) * PXPerMetre;
+            f64 Y = MidY - (
+                FLVColumnF64At(Norths, Record) - State->CentreNorth
+            ) * PXPerMetre;
+
+            // NOTE(nc): a ring that is all out of the rect is not drawn
+            if (
+                X >= (f64) Local.X0 - Pad &&
+                X < (f64) Local.X1 + Pad &&
+                Y >= (f64) Local.Y0 - Pad &&
+                Y < (f64) Local.Y1 + Pad
+            ) {
+                Data->Waypoints[Data->WaypointsCount++] = Vec(
+                    (f32) X,
+                    (f32) Y
+                );
+            }
+
+            if (HasPrev) {
+                f64 FromX = PrevX;
+                f64 FromY = PrevY;
+                f64 ToX = X;
+                f64 ToY = Y;
+
+                if (
+                    FLAPGraphClipLine(
+                        Local,
+                        Pad,
+                        &FromX,
+                        &FromY,
+                        &ToX,
+                        &ToY
+                    )
+                ) {
+                    FLAPMapSegment* Leg = &Data->Legs[Data->LegsCount++];
+
+                    Leg->From = Vec((f32) FromX, (f32) FromY);
+                    Leg->To = Vec((f32) ToX, (f32) ToY);
+                }
+            }
+
+            PrevX = X;
+            PrevY = Y;
+            HasPrev = TRUE;
+        }
+    }
+
+    ReleaseScratch(Scratch);
+
+    return Result;
+}
+
+// NOTE(nc): the track of a flight, north up, with one scale for both axes.
+//         : the camera is fitted one time to all the flight and then only
+//         : the user moves it. the track is the ranges of the map, cut to
+//         : the time that the graphs of the tab show.
+INTERNAL void
+FLAPMap(FLAPMapParams* Params, r2f32 Rect)
+{
+    FLAPMapState* State = Params->State;
+    FLVRenderMap const* Map = Params->Map;
+    FLIParsed* FLI = Params->FLI;
+    Arena* BuildMemPool = UIBuildMemPool();
+    FLAPMapDrawData* Data = ArenaPushArrayZero(
+        BuildMemPool,
+        FLAPMapDrawData,
+        1
+    );
+    u32 Width = (u32) Length(Rect).X;
+    u32 Height = (u32) Length(Rect).Y;
+    u32 NorthIndex = 0;
+    u32 EastIndex = 0;
+    u32 TimeIndex = 0;
+
+    for (
+        u32 Index = 0;
+        Index < ARRAY_COUNT(FLAP_MAP_SOURCE_TABLE) && !NorthIndex;
+        ++Index
+    ) {
+        NorthIndex = FLIColumnIndexFromNames(
+            FLI,
+            FLAP_MAP_SOURCE_TABLE[Index],
+            "N"_s8
+        );
+        EastIndex = FLIColumnIndexFromNames(
+            FLI,
+            FLAP_MAP_SOURCE_TABLE[Index],
+            "E"_s8
+        );
+    }
+
+    if (NorthIndex && EastIndex) {
+        FLIColumn* Record = FLIElementFromNameIndex(
+            FLI,
+            Columns,
+            COLUMNS,
+            NorthIndex
+        );
+        FLIMessageType* Type = FLIElementFromNameIndex(
+            FLI,
+            MessageTypes,
+            MESSAGE_TYPES,
+            Record->MessageTypeIndex
+        );
+
+        TimeIndex = Type->TimeColumn;
+    }
+
+    if (!NorthIndex || !EastIndex || !TimeIndex) {
+        UITag("weak"_s8) {
+            UIWidthFill() {
+                UILabel("no position in this flight"_s8);
+            }
+        }
+
+        return;
+    }
+
+    // NOTE(nc): the stats of the two columns are the box of the flight,
+    //         : so the fit reads no sample
+    if (
+        State->UnitHash != Params->UnitHash ||
+        State->Flight != Params->Flight
+    ) {
+        State->UnitHash = Params->UnitHash;
+        State->Flight = Params->Flight;
+        State->IsFitted = FALSE;
+    }
+
+    if (!State->IsFitted && Width && Height) {
+        FLIColumn* North = FLIElementFromNameIndex(
+            FLI,
+            Columns,
+            COLUMNS,
+            NorthIndex
+        );
+        FLIColumn* East = FLIElementFromNameIndex(
+            FLI,
+            Columns,
+            COLUMNS,
+            EastIndex
+        );
+        u32 MissionNorthIndex = FLIColumnIndexFromNames(
+            FLI,
+            "CMD"_s8,
+            "N"_s8
+        );
+        u32 MissionEastIndex = FLIColumnIndexFromNames(
+            FLI,
+            "CMD"_s8,
+            "E"_s8
+        );
+        r1f64 Norths = Rng(North->Min, North->Max);
+        r1f64 Easts = Rng(East->Min, East->Max);
+
+        // NOTE(nc): the mission is in the fit, so a waypoint that the
+        //         : flight did not get to is in view
+        if (MissionNorthIndex && MissionEastIndex) {
+            FLIColumn* MissionNorth = FLIElementFromNameIndex(
+                FLI,
+                Columns,
+                COLUMNS,
+                MissionNorthIndex
+            );
+            FLIColumn* MissionEast = FLIElementFromNameIndex(
+                FLI,
+                Columns,
+                COLUMNS,
+                MissionEastIndex
+            );
+
+            if (MissionNorth->Count) {
+                Norths = Union(
+                    Norths,
+                    Rng(MissionNorth->Min, MissionNorth->Max)
+                );
+                Easts = Union(
+                    Easts,
+                    Rng(MissionEast->Min, MissionEast->Max)
+                );
+            }
+        }
+
+        f64 Scale = FLAP_MAP_FIT_MARGIN * MAX(
+            Length(Easts) / (f64) Width,
+            Length(Norths) / (f64) Height
+        );
+
+        State->CentreNorth = Centre(Norths);
+        State->CentreEast = Centre(Easts);
+        State->MetresPerPX = CLAMP(
+            FLAP_MAP_METRES_PER_PX_MIN,
+            Scale,
+            FLAP_MAP_METRES_PER_PX_MAX
+        );
+        State->IsFitted = TRUE;
+    }
+
+    FLVColumn Time = {};
+    FLVColumn North = {};
+    FLVColumn East = {};
+    b32 IsReady = FLVColumnInit(
+        Params->Acc,
+        Params->Flight,
+        FLI,
+        TimeIndex,
+        0,
+        &Time
+    );
+
+    IsReady &= FLVColumnInit(
+        Params->Acc,
+        Params->Flight,
+        FLI,
+        NorthIndex,
+        0,
+        &North
+    );
+    IsReady &= FLVColumnInit(
+        Params->Acc,
+        Params->Flight,
+        FLI,
+        EastIndex,
+        0,
+        &East
+    );
+
+    b32 HasTrack = (
+        IsReady &&
+        State->IsFitted &&
+        Time.Data &&
+        North.Data &&
+        East.Data &&
+        North.Kind == FLI_SCALAR_KIND_F32 &&
+        East.Kind == FLI_SCALAR_KIND_F32 &&
+        North.Encoding == FLI_COLUMN_ENCODING_RAW &&
+        East.Encoding == FLI_COLUMN_ENCODING_RAW
+    );
+
+    if (HasTrack && Map->Count) {
+        TempArena Scratch = GetScratch(&BuildMemPool, 1);
+        f32 const* Norths = (f32 const*) North.Data;
+        f32 const* Easts = (f32 const*) East.Data;
+        u64 Count = MIN(Time.Count, MIN(North.Count, East.Count));
+        r1u64 View = Rng((u64) 0, U64_MAX);
+        r1u64* Samples = ArenaPushArrayZero(
+            Scratch.MemPool,
+            r1u64,
+            Map->Count
+        );
+        r2f32 Local = Rng(0.0f, 0.0f, (f32) Width, (f32) Height);
+        f64 PXPerMetre = 1.0 / State->MetresPerPX;
+        f64 MidX = 0.5 * (f64) Width;
+        f64 MidY = 0.5 * (f64) Height;
+        f64 Pad = 2.0 * (f64) Params->LineWidth;
+        u64 Capacity = 0;
+
+        // NOTE(nc): a tab with no graph has no fit, and its map has all
+        //         : the time of its ranges
+        if (Params->Graph && Params->Graph->IsFitted)
+            View = Params->Graph->TimeRangeUSecs;
+
+        for (u64 Index = 0; Index < Map->Count; ++Index) {
+            u64 Min = MAX(Map->Ranges[Index].Min, View.Min);
+            u64 Max = MIN(Map->Ranges[Index].Max, View.Max);
+
+            if (Min > Max)
+                continue;
+
+            Samples[Index].Min = FLVLowerBoundU64(&Time, Min);
+            Samples[Index].Max = MIN(FLVUpperBoundU64(&Time, Max), Count);
+
+            if (Samples[Index].Max > Samples[Index].Min)
+                Capacity += Samples[Index].Max - Samples[Index].Min;
+        }
+
+        if (Capacity) {
+            FLAPMapSegment* Segments = ArenaPushArray(
+                Scratch.MemPool,
+                FLAPMapSegment,
+                Capacity
+            );
+            u64 SegmentsCount = 0;
+
+            // NOTE(nc): a sample that is less than a pixel from the last
+            //         : one that was kept is not kept, so the segments are
+            //         : as many as the pixels of the track and not as its
+            //         : samples. a segment is cut to the rect in f64, and
+            //         : one with no part in the rect is not drawn. a range
+            //         : starts a new line, so a gap is a gap.
+            for (u64 Index = 0; Index < Map->Count; ++Index) {
+                f64 PrevX = 0.0;
+                f64 PrevY = 0.0;
+                b32 HasPrev = FALSE;
+
+                for (
+                    u64 Sample = Samples[Index].Min;
+                    Sample < Samples[Index].Max;
+                    ++Sample
+                ) {
+                    f32 N = Norths[Sample];
+                    f32 E = Easts[Sample];
+
+                    // NOTE(nc): a record from before the first position
+                    //         : is at the origin
+                    if (N == 0.0f && E == 0.0f)
+                        continue;
+
+                    f64 X = MidX + ((f64) E - State->CentreEast) * PXPerMetre;
+                    f64 Y = MidY - ((f64) N - State->CentreNorth) * PXPerMetre;
+
+                    if (HasPrev) {
+                        f64 DeltaX = X - PrevX;
+                        f64 DeltaY = Y - PrevY;
+
+                        if (DeltaX * DeltaX < 1.0 && DeltaY * DeltaY < 1.0)
+                            continue;
+
+                        f64 FromX = PrevX;
+                        f64 FromY = PrevY;
+                        f64 ToX = X;
+                        f64 ToY = Y;
+
+                        if (
+                            FLAPGraphClipLine(
+                                Local,
+                                Pad,
+                                &FromX,
+                                &FromY,
+                                &ToX,
+                                &ToY
+                            )
+                        ) {
+                            FLAPMapSegment* Segment = &Segments[SegmentsCount++];
+
+                            Segment->From = Vec((f32) FromX, (f32) FromY);
+                            Segment->To = Vec((f32) ToX, (f32) ToY);
+                        }
+                    }
+
+                    PrevX = X;
+                    PrevY = Y;
+                    HasPrev = TRUE;
+                }
+            }
+
+            Data->Segments = ArenaPushArray(
+                BuildMemPool,
+                FLAPMapSegment,
+                SegmentsCount
+            );
+            Data->SegmentsCount = SegmentsCount;
+            MemCpy(
+                Data->Segments,
+                Segments,
+                SegmentsCount * sizeof(FLAPMapSegment)
+            );
+        }
+
+        ReleaseScratch(Scratch);
+    }
+
+    Data->Colour = UIColourFromName("curve_0"_s8);
+    Data->LineWidth = Params->LineWidth;
+    Data->WaypointRadius = 3.0f * Params->LineWidth;
+
+    UITag("weak"_s8) {
+        Data->MissionColour = UIColourFromName("text"_s8);
+    }
+
+    IsReady &= FLAPMapMission(
+        Params,
+        Data,
+        Rng(0.0f, 0.0f, (f32) Width, (f32) Height)
+    );
+
+    IsReady &= FLAPMapTiles(
+        Params,
+        Data,
+        Rng(0.0f, 0.0f, (f32) Width, (f32) Height)
+    );
+
+    if (!IsReady)
+        State->SettleEndUSecs = TimeNow() + FLAP_MAP_SETTLE_USECS;
+
+    if (TimeNow() < State->SettleEndUSecs)
+        AppRequestFrame();
+
+    UISetNextPreferredSize(AXIS_2D_X, UI_PERCENT(1.0f, 0.0f));
+    UISetNextPreferredSize(AXIS_2D_Y, UI_PX((f32) Height, 1.0f));
+
+    UIBox* Box = UIBuildBoxFromStrFmt(
+        UI_BOX_KIND_MOUSE_CLICKABLE | UI_BOX_KIND_SCROLL,
+        "###map_%u",
+        Params->Key
+    );
+
+    UIBoxEquipCustomDraw(Box, FLAPMapDraw, Data);
+
+    UISignal Sig = UISignalFromBox(Box);
+
+    if (UI_PRESSED(Sig))
+        AppCmd(APP_COMMAND_KIND_FOCUS_PANEL);
+
+    // NOTE(nc): a zoom has the steps of the zoom of the graph, and the
+    //         : place that is under the mouse stays under it
+    if (Sig.Scroll.Y && State->IsFitted) {
+        f64 Scale = CLAMP(
+            FLAP_MAP_METRES_PER_PX_MIN,
+            State->MetresPerPX * FLAPGraphZoomFactor(Sig.Scroll.Y),
+            FLAP_MAP_METRES_PER_PX_MAX
+        );
+        f64 OffsetX = (f64) (UIMouse().X - Box->Rect.X0) - 0.5 * (f64) Width;
+        f64 OffsetY = (f64) (UIMouse().Y - Box->Rect.Y0) - 0.5 * (f64) Height;
+
+        State->CentreEast += OffsetX * (State->MetresPerPX - Scale);
+        State->CentreNorth -= OffsetY * (State->MetresPerPX - Scale);
+        State->MetresPerPX = Scale;
+        State->SettleEndUSecs = TimeNow() + FLAP_MAP_SETTLE_USECS;
+        AppRequestFrame();
+    }
+
+    // NOTE(nc): a double click fits the camera again. the second press
+    //         : would start a pan from the old camera, so it is killed.
+    if (UI_DOUBLE_CLICKED(Sig)) {
+        State->IsFitted = FALSE;
+        UIKillAction();
+        AppRequestFrame();
+    } else if (UI_PRESSED(Sig)) {
+        FLAPMapDrag Drag = {};
+
+        Drag.CentreNorth = State->CentreNorth;
+        Drag.CentreEast = State->CentreEast;
+        UIStoreDragStruct(&Drag);
+    } else if (UI_DRAGGING(Sig)) {
+        FLAPMapDrag Start = *UIGetDragStruct(FLAPMapDrag);
+        v2f32 Shift = UIDragDelta();
+
+        State->CentreEast = Start.CentreEast - (f64) Shift.X * State->MetresPerPX;
+        State->CentreNorth = Start.CentreNorth + (f64) Shift.Y * State->MetresPerPX;
+        AppRequestFrame();
     }
 }

@@ -27,12 +27,6 @@
 #include "nc_window.h"
 #include "nc_log.h"
 
-#if !defined(STB_IMAGE_IMPLEMENTATION)
-    #define STBI_NO_STDIO
-    #define STB_IMAGE_IMPLEMENTATION
-    #include "stb_image.h"
-#endif
-
 // TODO(nc): Change CAD references and names to Diagram, CAD view is okay but
 // TODO    : within the running application it should be refered to as Diagram
 

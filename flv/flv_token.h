@@ -72,6 +72,7 @@ enum : u8 {
     TOKEN_KIND_IF                 = 8,
     TOKEN_KIND_ELSE               = 9,
     TOKEN_KIND_IMPORT             = 10,
+    TOKEN_KIND_MAP                = 11,
 
     TOKEN_KIND_CHAR_LIT           = 202,
     TOKEN_KIND_STR_LIT            = 203,

@@ -2371,6 +2371,70 @@ LowerFlag(LowerState* State, ASTNodeDisplay* Display)
     );
 }
 
+// NOTE(nc): a map has the ranges of its selection, in the filters that
+//         : it is in. a map with no selection and no filter has one
+//         : range, which is the whole flight, so a map always has ranges.
+internal void
+LowerMap(LowerState* State, ASTNodeDisplay* Display)
+{
+    ++State->TableGroup;
+
+    FLVOperand Selection = State->CtxSel[State->CtxDepth];
+    Str8 Label = "map"_s8;
+
+    if (Display->Header.Count)
+        Label = ArgLabel(State, &Display->Arg[0]);
+
+    if (State->Missing) {
+        EmitMissing(State, TOKEN_KIND_MAP, Label);
+
+        return;
+    }
+
+    if (Display->Header.Count) {
+        FLVOperand Ranges = LowerSelection(State, Display->Arg[0].Expr);
+
+        if (Ranges == FLV_OPERAND_NONE) {
+            EmitMissing(State, TOKEN_KIND_MAP, Label);
+
+            return;
+        }
+
+        if (Selection == FLV_OPERAND_NONE) {
+            Selection = Ranges;
+        } else {
+            Selection = EmitOp(
+                State,
+                FLV_KERNEL_SEL_AND,
+                Selection,
+                Ranges
+            );
+        }
+    }
+
+    if (Selection == FLV_OPERAND_NONE) {
+        Selection = EmitOp(
+            State,
+            FLV_KERNEL_SEL_FROM_TIME_RANGE,
+            ConstTime(State, 0),
+            ConstTime(State, U64_MAX)
+        );
+    }
+
+    EmitOp(
+        State,
+        FLV_KERNEL_EMIT_MAP,
+        Selection,
+        (FLVOperand) EmitAdd(
+            State,
+            TOKEN_KIND_MAP,
+            1,
+            FLV_ELEMENT_KIND_SELECTION,
+            Label
+        )
+    );
+}
+
 internal void
 EmitOpInto(
     LowerState* State,
@@ -2567,6 +2631,10 @@ LowerDisplay(LowerState* State, ASTNodeDisplay* Display)
 
         case TOKEN_KIND_FLAG: {
             LowerFlag(State, Display);
+        } break;
+
+        case TOKEN_KIND_MAP: {
+            LowerMap(State, Display);
         } break;
     }
 }

@@ -17,6 +17,7 @@ struct Arena;
 #define CHECK_BOOL_TYPE        BUILTIN_b32
 #define CHECK_SLOT_MAX         1024
 #define CHECK_CALL_ARG_MAX     16
+#define CHECK_SCOPE_KIND_MAP   (1U << 31)
 
 #define CHECK_EXPR_NONE 0
 
