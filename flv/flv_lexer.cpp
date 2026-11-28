@@ -20,8 +20,9 @@ global const Str8 KEYWORDS[] = {
     Str8Lit("var"),
     Str8Lit("graph"),
     Str8Lit("table"),
-    Str8Lit("text"),
-    Str8Lit("flag")
+    Str8Lit("write"),
+    Str8Lit("flag"),
+    Str8Lit("map")
 };
 
 global const TokenKind KEYWORD_KINDS[] = {
@@ -32,8 +33,9 @@ global const TokenKind KEYWORD_KINDS[] = {
     TOKEN_KIND_VAR,
     TOKEN_KIND_GRAPH,
     TOKEN_KIND_TABLE,
-    TOKEN_KIND_TEXT,
-    TOKEN_KIND_FLAG
+    TOKEN_KIND_WRITE,
+    TOKEN_KIND_FLAG,
+    TOKEN_KIND_MAP
 
 };
 
@@ -1010,8 +1012,8 @@ LexTripleCharSymbol(v256* CurrentVec, v256* NextVec, v256* Tags)
     );
 
     const u8 PunctuationData[2][3] = {
-        {1, 1, 1},      // <<=
-        {2, 2, 1}       // >>=
+        {0, 0, 0},      // <<=
+        {1, 1, 0}       // >>=
     };
     u32 Mask = 0;
 

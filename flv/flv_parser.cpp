@@ -1035,6 +1035,15 @@ ParseDisplay(void)
     ExpectToken(TOKEN_KIND_OPEN_PAREN);
  
     do {
+        // NOTE(nc): a map with no selection has no argument
+        if (
+            !Count &&
+            Keyword.Kind == TOKEN_KIND_MAP &&
+            CurrentToken().Kind == TOKEN_KIND_ClOSE_PAREN
+        ) {
+            break;
+        }
+
         ASSERT(Count < DISPLAY_ARG_MAX);
  
         ASTDisplayArg* Arg = &Args[Count++];
@@ -1047,15 +1056,19 @@ ParseDisplay(void)
         Arg->IsLabel = (u8) ExprIsStrLit(Arg->Expr);
  
         if (
-            Arg->IsLabel && 
+            Arg->IsLabel &&
             !(
-                Keyword.Kind == TOKEN_KIND_FLAG && 
+                Keyword.Kind == TOKEN_KIND_FLAG &&
                 Count == 2
+            ) &&
+            !(
+                Keyword.Kind == TOKEN_KIND_WRITE &&
+                Count <= 2
             )
         ) {
             PARSE_ERROR(
-                ArgTok, 
-                "a string literal is only legal as the second argument of flag()"
+                ArgTok,
+                "a string literal is only legal as the second argument of flag() and as the format of write()"
             );
         }
  
@@ -1209,8 +1222,9 @@ ParseStmt(void)
  
         case TOKEN_KIND_GRAPH:
         case TOKEN_KIND_TABLE:
-        case TOKEN_KIND_TEXT:
-        case TOKEN_KIND_FLAG: {
+        case TOKEN_KIND_WRITE:
+        case TOKEN_KIND_FLAG:
+        case TOKEN_KIND_MAP: {
             Result = ParseDisplay();
         } break;
  

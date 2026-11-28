@@ -39,6 +39,48 @@ FLAPExportFlush(FLAPExportWriter* Writer)
     }
 }
 
+// NOTE(nc): the file is made with another name. a file that is not
+//         : opened has a writer that has failed, so the writes to it
+//         : do nothing and FLAPExportClose is FALSE.
+INTERNAL FLAPExportWriter
+FLAPExportOpen(Arena* MemPool, Str8 FilePath, u8* Chunk)
+{
+    FLAPExportWriter Result = {};
+
+    Result.FilePath = FilePath;
+    Result.TempPath = ArenaPushStrFmt(
+        MemPool,
+        "%S.tmp",
+        PRINT_STR(FilePath)
+    );
+    Result.File = SystemOpenFile(SYS_ACCESS_WRITE, Result.TempPath);
+    Result.Chunk = Chunk;
+    Result.Capacity = FLAP_EXPORT_CHUNK_SIZE;
+    Result.HasFailed = (Result.File == EMPTY_HANDLE_VALUE);
+
+    return Result;
+}
+
+// NOTE(nc): the file is moved to its name when it is whole, so a file
+//         : that is not whole is never at its name.
+INTERNAL b32
+FLAPExportClose(FLAPExportWriter* Writer, b32 IsOk)
+{
+    FLAPExportFlush(Writer);
+
+    b32 Result = (IsOk && !Writer->HasFailed);
+
+    SystemCloseFile(Writer->File);
+
+    if (Result)
+        Result = SystemMoveFile(Writer->FilePath, Writer->TempPath);
+
+    if (!Result)
+        SystemDeleteFile(Writer->TempPath);
+
+    return Result;
+}
+
 INTERNAL void
 FLAPExportWrite(FLAPExportWriter* Writer, Str8 String)
 {
@@ -62,6 +104,105 @@ FLAPExportWrite(FLAPExportWriter* Writer, Str8 String)
         MemCpy(Writer->Chunk + Writer->Size, String.Str, String.Size);
         Writer->Size += String.Size;
     }
+}
+
+INTERNAL u8*
+FLAPExportReserve(FLAPExportWriter* Writer, u64 Size)
+{
+    ASSERT(Size < Writer->Capacity);
+
+    if (Writer->Size + Size > Writer->Capacity)
+        FLAPExportFlush(Writer);
+
+    return Writer->Chunk + Writer->Size;
+}
+
+INTERNAL void
+FLAPExportCommit(FLAPExportWriter* Writer, u8* Ptr)
+{
+    Writer->Size = INT_FROM_PTR(Ptr - Writer->Chunk);
+}
+
+INTERNAL u8*
+FLAPExportPutU64(u8* Ptr, u64 Value)
+{
+    u8 Digits[20];
+    u32 Count = 0;
+
+    do {
+        Digits[Count++] = (u8) ('0' + Value % 10);
+        Value /= 10;
+    } while (Value);
+
+    while (Count)
+        *Ptr++ = Digits[--Count];
+
+    return Ptr;
+}
+
+// NOTE(nc): the last Width digits of the value, with zeros in front
+INTERNAL u8*
+FLAPExportPutPadded(u8* Ptr, u64 Value, u32 Width)
+{
+    for (u32 Index = Width; Index--; ) {
+        Ptr[Index] = (u8) ('0' + Value % 10);
+        Value /= 10;
+    }
+
+    return Ptr + Width;
+}
+
+INTERNAL u8*
+FLAPExportPutI64(u8* Ptr, i64 Value)
+{
+    u64 Magnitude = (u64) Value;
+
+    if (Value < 0) {
+        *Ptr++ = '-';
+        Magnitude = (u64) 0 - Magnitude;
+    }
+
+    return FLAPExportPutU64(Ptr, Magnitude);
+}
+
+// NOTE(nc): the time in seconds, with all six digits of the microseconds
+INTERNAL u8*
+FLAPExportPutTime(u8* Ptr, u64 TimeUSecs)
+{
+    Ptr = FLAPExportPutU64(Ptr, TimeUSecs / MILLION(1));
+    *Ptr++ = '.';
+    Ptr = FLAPExportPutPadded(Ptr, TimeUSecs % MILLION(1), 6);
+
+    return Ptr;
+}
+
+// NOTE(nc): a NaN, an infinity and a value that is too large for its
+//         : whole part fail the test, and nothing is written for them.
+INTERNAL u8*
+FLAPExportPutF64(u8* Ptr, f64 Value)
+{
+    f64 Magnitude = AbsF64(Value);
+
+    if (Magnitude < 1.0e18) {
+        u64 Whole = (u64) Magnitude;
+        u64 Part = (u64) (
+            (Magnitude - (f64) Whole) * (f64) FLAP_EXPORT_F64_SCALE + 0.5
+        );
+
+        if (Part >= FLAP_EXPORT_F64_SCALE) {
+            Part -= FLAP_EXPORT_F64_SCALE;
+            ++Whole;
+        }
+
+        if (Value < 0.0 && (Whole || Part))
+            *Ptr++ = '-';
+
+        Ptr = FLAPExportPutU64(Ptr, Whole);
+        *Ptr++ = '.';
+        Ptr = FLAPExportPutPadded(Ptr, Part, FLAP_EXPORT_F64_DECIMALS);
+    }
+
+    return Ptr;
 }
 
 INTERNAL void
@@ -103,33 +244,19 @@ FLAPExport(FLAPExportKind Kind, FLAPExportSource const* Source, Str8 FilePath)
 
     if (Kind < FLAP_EXPORT_KIND_COUNT && FLAP_EXPORT_KIND_FUNC_TABLE[Kind]) {
         TempArena Scratch = GetScratch(NULL, 0);
-        FLAPExportWriter Writer = {};
+        FLAPExportWriter Writer = FLAPExportOpen(
+            Scratch.MemPool,
+            FilePath,
+            ArenaPushArray(Scratch.MemPool, u8, FLAP_EXPORT_CHUNK_SIZE)
+        );
 
-        Writer.File = SystemOpenFile(SYS_ACCESS_WRITE, FilePath);
-
-        if (Writer.File != EMPTY_HANDLE_VALUE) {
-            Writer.Capacity = FLAP_EXPORT_CHUNK_SIZE;
-            Writer.Chunk = ArenaPushArray(
+        PROFILE(FLAPExportTimer) {
+            Result = FLAP_EXPORT_KIND_FUNC_TABLE[Kind](
                 Scratch.MemPool,
-                u8,
-                Writer.Capacity
+                Source,
+                &Writer
             );
-
-            PROFILE(FLAPExportTimer) {
-                Result = FLAP_EXPORT_KIND_FUNC_TABLE[Kind](
-                    Scratch.MemPool,
-                    Source,
-                    &Writer
-                );
-                FLAPExportFlush(&Writer);
-                Result = (Result && !Writer.HasFailed);
-            }
-
-            SystemCloseFile(Writer.File);
-
-            // NOTE(nc): a file that is not whole is not left on the disk
-            if (!Result)
-                SystemDeleteFile(FilePath);
+            Result = FLAPExportClose(&Writer, Result);
         }
 
         if (!Result) {

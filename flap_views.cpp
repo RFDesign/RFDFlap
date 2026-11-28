@@ -184,6 +184,23 @@ FLAPExportPath(
     return Result;
 }
 
+// NOTE(nc): <folder of the FLV>/<name of the FLV>_<timestamp>.png
+INTERNAL Str8
+FLAPTabExportPath(Arena* MemPool)
+{
+    Str8 Path = AppViewFilePath();
+    Str8 Result = ArenaPushStrFmt(
+        MemPool,
+        "%S/%S_%llu.%S",
+        PRINT_STR(StrChopLastSlash(Path)),
+        PRINT_STR(StrChopLastDot(StrSkipLastSlash(Path))),
+        TimeGetTimestamp(),
+        PRINT_STR(FLAP_EXPORT_KIND_EXTENSION_TABLE[FLAP_EXPORT_KIND_PNG])
+    );
+
+    return Result;
+}
+
 INTERNAL b32
 FLAPToolButton(
     AppIconKind Icon,
@@ -225,6 +242,31 @@ FLAPToolButton(
 }
 
 INTERNAL void
+FLAPAnalysisMap(
+    FLAPViewTabCtx* Ctx,
+    u32 NodeIndex,
+    FLVRenderItem* Items,
+    u32 MapEmit,
+    r2f32 Rect
+) {
+    FLAPViewTabState* State = Ctx->State;
+    FLAPMapParams Params = {};
+
+    Params.Acc = Ctx->Acc;
+    Params.FLI = Ctx->FLI;
+    Params.Map = &Items[MapEmit].Map;
+    Params.Graph = &State->Graph;
+    Params.State = &State->Maps[NodeIndex];
+    Params.UnitHash = Ctx->Unit->Hash;
+    Params.Flight = Ctx->Keys[Ctx->Flight];
+    Params.Key = NodeIndex;
+    Params.LineWidth = FLAPGraphMetricsFromFontSize(
+        UIHeadFontSize()
+    ).LineWidth;
+    FLAPMap(&Params, Rect);
+}
+
+INTERNAL void
 FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
 {
     FLVLayoutNode const* Node = &Ctx->Unit->Lowered.Layout[NodeIndex];
@@ -243,6 +285,7 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
         0
     );
     u32 TableEmit = U32_MAX;
+    u32 MapEmit = U32_MAX;
     u32 FlagCount = 0;
     u32 CurveCount = 0;
 
@@ -268,6 +311,15 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                 ++FlagCount;
 
             if (
+                Kind == TOKEN_KIND_MAP &&
+                MapEmit == U32_MAX &&
+                !Items[Index].IsMissing &&
+                Items[Index].Kind == FLV_RENDER_KIND_MAP
+            ) {
+                MapEmit = Index;
+            }
+
+            if (
                 Kind == TOKEN_KIND_GRAPH &&
                 !Items[Index].IsMissing &&
                 Items[Index].Kind == FLV_RENDER_KIND_CURVE
@@ -279,6 +331,7 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
 
     b32 IsGraph = (CurveCount != 0);
     b32 IsTable = (!IsGraph && TableEmit != U32_MAX);
+    b32 IsMap = (MapEmit != U32_MAX);
 
     UISetNextChildLayoutAxis(AXIS_2D_Y);
 
@@ -347,10 +400,11 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                                 : FLAP_GRAPH_CAPTURE_KIND_CLIPBOARD;
                         }
                     } else if (IsTable) {
+                        b32 HasTips = !State->Graph.CaptureKind;
                         b32 CSVClicked = FLAPToolButton(
                             APP_ICON_KIND_GRID,
                             "###export_csv"_s8,
-                            "Export table as CSV"_s8,
+                            HasTips ? "Export table as CSV"_s8 : ""_s8,
                             APP_COMMAND_KIND_INFO_TABLE[
                                 APP_COMMAND_KIND_EXPORT_TABLE_CSV
                             ].String
@@ -358,7 +412,7 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                         b32 TXTClicked = FLAPToolButton(
                             APP_ICON_KIND_LIST,
                             "###export_txt"_s8,
-                            "Export table as text"_s8,
+                            HasTips ? "Export table as text"_s8 : ""_s8,
                             APP_COMMAND_KIND_INFO_TABLE[
                                 APP_COMMAND_KIND_EXPORT_TABLE_TXT
                             ].String
@@ -383,6 +437,58 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
         }
 
         Rect.Y0 += RowHeight;
+
+        // NOTE(nc): the lines of the write directives, above what the
+        //         : analysis shows. a write that did not run has no line.
+        //         : a write with ranges has a line for each range, with a
+        //         : line break between two of them. a label draws one
+        //         : line, so each line is a label of its own.
+        for (
+            u32 Index = 0;
+            Items && Index < Program->EmitCount;
+            ++Index
+        ) {
+            if (
+                Program->Emits[Index].DisplayKind != TOKEN_KIND_WRITE ||
+                Items[Index].Kind != FLV_RENDER_KIND_TEXT
+            ) {
+                continue;
+            }
+
+            Str8 Text = Items[Index].Text;
+            u32 Line = 0;
+
+            for (u64 Start = 0; Start <= Text.Size; ++Line) {
+                u64 End = Start;
+
+                for ( ; End < Text.Size && Text.Str[End] != '\n'; ++End);
+
+                // NOTE(nc): no room for more lines
+                if (Length(Rect).Y < 2.0f * RowHeight)
+                    break;
+
+                UIWidthFill() {
+                    UILabel(
+                        "%S###write_%u_%u",
+                        PRINT_STR(StrSub(Text, Rng(Start, End))),
+                        Index,
+                        Line
+                    );
+                }
+
+                Rect.Y0 += RowHeight;
+                Start = End + 1;
+            }
+        }
+
+        // NOTE(nc): a map has the lower half of an analysis that has a
+        //         : graph, and all of one that has none
+        r2f32 MapRect = Rect;
+
+        if (IsMap && IsGraph) {
+            MapRect.Y0 = FloorF32(0.5f * (Rect.Y0 + Rect.Y1));
+            Rect.Y1 = MapRect.Y0;
+        }
 
         if (!Items) {
             UITag("weak"_s8) {
@@ -419,6 +525,11 @@ FLAPAnalysisUI(FLAPViewTabCtx* Ctx, u32 NodeIndex, r2f32 Rect)
                 UIHeadFontSize()
             );
             FLAPGraph(&Params, Rect);
+
+            if (IsMap)
+                FLAPAnalysisMap(Ctx, NodeIndex, Items, MapEmit, MapRect);
+        } else if (IsMap) {
+            FLAPAnalysisMap(Ctx, NodeIndex, Items, MapEmit, MapRect);
         } else if (IsTable) {
             FLAPTableParams Params = {};
 
@@ -776,7 +887,10 @@ FLAPGraphCaptureExport(
 
     if (Graph->CaptureKind == FLAP_GRAPH_CAPTURE_KIND_CLIPBOARD) {
         SetClipboardImage(Capture->Size, Capture->Pixels);
-    } else if (Graph->HotKey < Ctx->Unit->Lowered.LayoutCount) {
+    } else if (
+        Graph->IsTabCapture ||
+        Graph->HotKey < Ctx->Unit->Lowered.LayoutCount
+    ) {
         FLAPExportSource Source = {};
 
         Source.Pixels = Capture->Pixels;
@@ -784,12 +898,14 @@ FLAPGraphCaptureExport(
         FLAPExport(
             FLAP_EXPORT_KIND_PNG,
             &Source,
-            FLAPExportPath(
-                MemPool,
-                Ctx,
-                Graph->HotKey,
-                FLAP_EXPORT_KIND_PNG
-            )
+            Graph->IsTabCapture
+                ? FLAPTabExportPath(MemPool)
+                : FLAPExportPath(
+                    MemPool,
+                    Ctx,
+                    Graph->HotKey,
+                    FLAP_EXPORT_KIND_PNG
+                )
         );
     }
 }
@@ -1077,6 +1193,7 @@ APP_VIEW_UI_FUNC_DEF(FLVView)
 
                 State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_NULL;
                 State->Graph.IsCaptureRequested = FALSE;
+                State->Graph.IsTabCapture = FALSE;
             }
 
             for (AppCommand* Cmd = NULL; AppNextViewCommand(&Cmd); ) {
@@ -1087,10 +1204,22 @@ APP_VIEW_UI_FUNC_DEF(FLVView)
 
                     case APP_COMMAND_KIND_EXPORT_GRAPH_PNG: {
                         State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_FILE;
+                        State->Graph.IsTabCapture = FALSE;
                     } break;
 
                     case APP_COMMAND_KIND_COPY_GRAPH_IMAGE: {
                         State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_CLIPBOARD;
+                        State->Graph.IsTabCapture = FALSE;
+                    } break;
+
+                    case APP_COMMAND_KIND_EXPORT_TAB_PNG: {
+                        State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_FILE;
+                        State->Graph.IsTabCapture = TRUE;
+                    } break;
+
+                    case APP_COMMAND_KIND_COPY_TAB_IMAGE: {
+                        State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_CLIPBOARD;
+                        State->Graph.IsTabCapture = TRUE;
                     } break;
 
                     case APP_COMMAND_KIND_EXPORT_TABLE_CSV: {
@@ -1162,6 +1291,30 @@ APP_VIEW_UI_FUNC_DEF(FLVView)
                 RendRequestWindowCapture(WindowState->RendHandle, CaptureRect);
             } else {
                 State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_NULL;
+            }
+
+            // NOTE(nc): a capture of the tab is all of the view, with the
+            //         : tables as they are on the screen. the view asks
+            //         : for it, so a tab with no graph has one too.
+            if (State->Graph.IsTabCapture && State->Graph.CaptureKind) {
+                State->Graph.CaptureRect = Rect;
+                State->Graph.IsCaptureRequested = TRUE;
+                AppRequestFrame();
+            }
+
+            // NOTE(nc): the hot graph, or the view, asked for a capture in
+            //         : this frame. if none did, the command is dropped.
+            if (State->Graph.IsCaptureRequested) {
+                r2i32 CaptureRect = {};
+
+                CaptureRect.X0 = (i32) FloorF32(State->Graph.CaptureRect.X0);
+                CaptureRect.Y0 = (i32) FloorF32(State->Graph.CaptureRect.Y0);
+                CaptureRect.X1 = (i32) CeilF32(State->Graph.CaptureRect.X1);
+                CaptureRect.Y1 = (i32) CeilF32(State->Graph.CaptureRect.Y1);
+                RendRequestWindowCapture(WindowState->RendHandle, CaptureRect);
+            } else {
+                State->Graph.CaptureKind = FLAP_GRAPH_CAPTURE_KIND_NULL;
+                State->Graph.IsTabCapture = FALSE;
             }
 
             if (

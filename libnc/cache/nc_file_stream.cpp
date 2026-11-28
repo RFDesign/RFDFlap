@@ -119,8 +119,13 @@ FSObjectAlloc(Str8 Key, b32* CancelSignal, OUT b32* Retry, OUT u64* Generation)
         FilePropsPost = SystemGetFileProperties(Path);
 
     CKey ContentKey = {};
+    Str8List IDParts = {};
 
-    ContentKey.ID.V[0] = BigHash(Key);
+    ListPush(Scratch.MemPool, &IDParts, Key);
+    ListPush(Scratch.MemPool, &IDParts, Str8Struct(Generation));
+    ContentKey.ID.V[0] = BigHash(
+        StrListJoin(Scratch.MemPool, &IDParts, NULL)
+    );
 
     b32 ReadOkay = FALSE;
 
@@ -237,7 +242,8 @@ FSKeyFromPathRange(Str8 Path, r1u64 Range, u64 EndTimeUSecs)
         Key, 
         FSObjectAlloc, 
         FSObjectRelease, 
-        EndTimeUSecs
+        EndTimeUSecs,
+        __Params.Generation = Generation
     );
 
     MemCpy(&Result, &Object, sizeof(Result));

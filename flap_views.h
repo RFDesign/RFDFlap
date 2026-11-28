@@ -43,6 +43,7 @@ struct FLAPViewTabState {
     b32               IsTableExportWaiting;
     FLAPGraphHold     GraphHolds[FLV_LAYOUT_MAX];
     FLAPGraphClock    GraphClock;
+    FLAPMapState      Maps[FLV_LAYOUT_MAX];
     b32               IsFitRequested;
     u32               PrevGraphSettings;
     b32               HasPrevGraphSettings;

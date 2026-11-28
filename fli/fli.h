@@ -10,7 +10,7 @@
 
 // @defines____________________________________________________________________
 #define FLI_MAGIC_NUMBER     0x494C462E
-#define FLI_ENCODING_VERSION 3
+#define FLI_ENCODING_VERSION 4
 
 #define FLI_TIME_BLOCK_SHIFT   12
 #define FLI_TIME_BLOCK_SAMPLES (1ULL << FLI_TIME_BLOCK_SHIFT)
@@ -95,6 +95,14 @@ enum : u8 {
     FLI_COLUMN_ENCODING_DELTA_TIME
 };
 
+typedef u32 FLIOriginKind;
+enum : u32 {
+    FLI_ORIGIN_KIND_NULL,
+    FLI_ORIGIN_KIND_FIX,
+    FLI_ORIGIN_KIND_LAND_COMMAND,
+    FLI_ORIGIN_KIND_COUNT
+};
+
 enum FLIParseStatus {
     FLI_PARSE_STATUS_SUCCESS,
     FLI_PARSE_STATUS_HEADER_MISMATCH,
@@ -136,17 +144,19 @@ enum FLIParseStatus {
     X(NameMapNodes,   name_map_nodes,   FLINameMapNode)   \
  
 
-#define FLI_FILEINFO_XLIST           \
-    X(u32,    SourcePathStringIndex) \
-    X(u32,    VehicleStringIndex)    \
-    X(u32,    FirmwareStringIndex)   \
-    X(u32,    __Padding)             \
-    X(FLIMD5, SourceMD5)             \
-    X(u64,    StartTimeUSecs)        \
-    X(u64,    EndTimeUSecs)          \
-    X(u64,    RecordCount)           \
-    X(u64,    SkippedRecordCount)    \
-    X(u64,    StartUnixUSecs)        \
+#define FLI_FILEINFO_XLIST                  \
+    X(u32,           SourcePathStringIndex) \
+    X(u32,           VehicleStringIndex)    \
+    X(u32,           FirmwareStringIndex)   \
+    X(FLIOriginKind, OriginKind)            \
+    X(FLIMD5,        SourceMD5)             \
+    X(u64,           StartTimeUSecs)        \
+    X(u64,           EndTimeUSecs)          \
+    X(u64,           RecordCount)           \
+    X(u64,           SkippedRecordCount)    \
+    X(u64,           StartUnixUSecs)        \
+    X(f64,           OriginLat)             \
+    X(f64,           OriginLng)             \
  
 
 #define FLI_MESSAGETYPE_XLIST   \
@@ -348,16 +358,14 @@ struct FLIParsed {
     u64         RawDataSize;
     FLISection* Sections;
     u64         SectionsCount;
+    u8**        Unpacked;
 };
 
 struct FLINode {
     FLINode*       Next;
     FLINode*       Prev;
     FLIKey         Key;
-    Handle         File;
-    Handle         FileMap;
-    void*          FileBase;
-    FileProperties FileProps;
+    MappedFile     Mapped;
     Arena*         MemPool;
     FLIParsed      FLI;
     AccessPoint    Acc;
@@ -540,16 +548,18 @@ struct FLISection {
 };
  
 struct FLIFileInfo {
-    u32    SourcePathStringIndex;
-    u32    VehicleStringIndex;
-    u32    FirmwareStringIndex;
-    u32    __Padding;
-    FLIMD5 SourceMD5;
-    u64    StartTimeUSecs;
-    u64    EndTimeUSecs;
-    u64    RecordCount;
-    u64    SkippedRecordCount;
-    u64    StartUnixUSecs;
+    u32           SourcePathStringIndex;
+    u32           VehicleStringIndex;
+    u32           FirmwareStringIndex;
+    FLIOriginKind OriginKind;
+    FLIMD5        SourceMD5;
+    u64           StartTimeUSecs;
+    u64           EndTimeUSecs;
+    u64           RecordCount;
+    u64           SkippedRecordCount;
+    u64           StartUnixUSecs;
+    f64           OriginLat;
+    f64           OriginLng;
 };
  
 struct FLIMessageType {
@@ -807,15 +817,18 @@ struct FLIBakeError {
 };
  
 struct FLIBakeFileInfo {
-    Str8   SourcePath;
-    Str8   Vehicle;
-    Str8   Firmware;
-    FLIMD5 SourceMD5;
-    u64    StartTimeUSecs;
-    u64    EndTimeUSecs;
-    u64    RecordCount;
-    u64    SkippedRecordCount;
-    u64    StartUnixUSecs;
+    Str8          SourcePath;
+    Str8          Vehicle;
+    Str8          Firmware;
+    FLIMD5        SourceMD5;
+    u64           StartTimeUSecs;
+    u64           EndTimeUSecs;
+    u64           RecordCount;
+    u64           SkippedRecordCount;
+    u64           StartUnixUSecs;
+    f64           OriginLat;
+    f64           OriginLng;
+    FLIOriginKind OriginKind;
 };
  
 FLI_CHUNK_LIST_TYPES(BakeMessageType);
@@ -1176,7 +1189,7 @@ FLIBakeSection* FLIBakeSectionListPushNewUnpacked(Arena* MemPool, FLIBakeSection
 void FLIBakeSectionListCat(FLIBakeSectionList* Dst, FLIBakeSectionList* ToPush);
 FLISerialisedSection FLISerialisedSectionMakeUnpacked(void* Data, u64 Size);
 FLISerialisedSectionBundle FLISerialisedSectionBundleFromBakeResults(Arena* MemPool, FLIBakeResults* Results);
-Str8List FLIFileBlobsFromSectionBundle(Arena* MemPool, FLISerialisedSectionBundle* Bundle);
+b32 FLIWriteSectionBundle(Str8 FilePath, IN FLISerialisedSectionBundle* Bundle);
 FLIBakeResults FLIBake(Arena* MemPool, FLIBakeParams* Params);
 FLISerialisedSectionBundle FLICompress(Arena* MemPool, IN FLISerialisedSectionBundle* Bundle);
 u64 FLITimeBlockCount(u64 Count);

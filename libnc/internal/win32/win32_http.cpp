@@ -92,13 +92,23 @@ Win32HTTPStatusFunc(
             );
         } break;
 
+        case  WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE: {
+            AtomicCASU32(
+                &Request->Status,
+                WIN32_HTTP_REQUEST_STATUS_KIND_SEND_PENDING,
+                WIN32_HTTP_REQUEST_STATUS_KIND_SENT,
+                MEM_ORDER_CST_SEQ,
+                MEM_ORDER_CST_SEQ
+            );
+        } break;
+
         case  WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE: {
             Request->NextBodyChunk = NULL;
             Request->NextBodyChunkSize = 0;
             AtomicCASU32(
                 &Request->Status,
-                WIN32_HTTP_REQUEST_STATUS_KIND_RECEIVED,
                 WIN32_HTTP_REQUEST_STATUS_KIND_RECEIVE_PENDING,
+                WIN32_HTTP_REQUEST_STATUS_KIND_RECEIVED,
                 MEM_ORDER_CST_SEQ,
                 MEM_ORDER_CST_SEQ
             );
@@ -271,6 +281,9 @@ HTTPAsyncTick(void)
                 Request->SafeRing = SafeRing;
                 Request->ID = Params.ID;
                 Request->Status = WIN32_HTTP_REQUEST_STATUS_KIND_NULL;
+                Request->StatusCode = 0;
+                Request->TotalResponseBytes = 0;
+                Request->TotalResponseBytesSent = 0;
             }
 
             if (Request) {
@@ -425,7 +438,7 @@ HTTPAsyncTick(void)
                     ListPushFmt(
                         Scratch.MemPool,
                         &HeaderStrings,
-                        "User-Agent: %S\n",
+                        "User-Agent: %S\r\n",
                         PRINT_STR(UserAgent)
                     );
                 }
@@ -434,7 +447,7 @@ HTTPAsyncTick(void)
                     ListPushFmt(
                         Scratch.MemPool,
                         &HeaderStrings,
-                        "Authorization: %S\n",
+                        "Authorization: %S\r\n",
                         PRINT_STR(Authorisation)
                     );
                 }
@@ -443,7 +456,7 @@ HTTPAsyncTick(void)
                     ListPushFmt(
                         Scratch.MemPool,
                         &HeaderStrings,
-                        "Content-Type: %S\n",
+                        "Content-Type: %S\r\n",
                         PRINT_STR(ContentType)
                     );
                 }
@@ -514,8 +527,9 @@ HTTPAsyncTick(void)
                     Request->MemPool
                 );
 
-                if (Okay) {
-                    WinHttpSendRequest(
+                if (
+                    Okay &&
+                    !WinHttpSendRequest(
                         RequestHandle,
                         Header,
                         HeaderSize,
@@ -523,6 +537,12 @@ HTTPAsyncTick(void)
                         OptionalDataSize,
                         OptionalDataSize,
                         (DWORD_PTR) Request
+                    )
+                ) {
+                    AtomicExchangeU32(
+                        &Request->Status,
+                        WIN32_HTTP_REQUEST_STATUS_KIND_FAILED,
+                        MEM_ORDER_CST_SEQ
                     );
                 }
             }
@@ -552,7 +572,14 @@ HTTPAsyncTick(void)
                     WIN32_HTTP_REQUEST_STATUS_KIND_RECEIVE_PENDING, 
                     MEM_ORDER_CST_SEQ
                 );
-                WinHttpReceiveResponse(Request->RequestHandle, NULL);
+
+                if (!WinHttpReceiveResponse(Request->RequestHandle, NULL)) {
+                    AtomicExchangeU32(
+                        &Request->Status,
+                        WIN32_HTTP_REQUEST_STATUS_KIND_FAILED,
+                        MEM_ORDER_CST_SEQ
+                    );
+                }
             }
         }
 
@@ -780,10 +807,19 @@ HTTPAsyncTick(void)
                     WIN32_HTTP_REQUEST_STATUS_KIND_DATA_SIZE_PENDING,
                     MEM_ORDER_CST_SEQ
                 );
-                WinHttpQueryDataAvailable(
-                    Request->RequestHandle,
-                    NULL
-                );
+
+                if (
+                    !WinHttpQueryDataAvailable(
+                        Request->RequestHandle, 
+                        NULL
+                    )
+                ) {
+                    AtomicExchangeU32(
+                        &Request->Status,
+                        WIN32_HTTP_REQUEST_STATUS_KIND_FAILED,
+                        MEM_ORDER_CST_SEQ
+                    );
+                }
             }
         }
 
@@ -799,9 +835,9 @@ HTTPAsyncTick(void)
 
             if (
                 Request->Active &&
-                AtomicLoadU64(
+                AtomicLoadU32(
                     &Request->Status,
-                    MEM_ORDER_CST_SEQ
+                    MEM_ORDER_SEQ_CST
                 ) == WIN32_HTTP_REQUEST_STATUS_KIND_DATA_SIZE
             ) {
                 Request->NextBodyChunk = ArenaPushArrayZero(
@@ -812,14 +848,23 @@ HTTPAsyncTick(void)
                 AtomicExchangeU32(
                     &Request->Status,
                     WIN32_HTTP_REQUEST_STATUS_KIND_READ_PENDING,
-                    MEM_ORDER_CST_SEQ
+                    MEM_ORDER_SEQ_CST
                 );
-                WinHttpReadData(
-                    Request->RequestHandle,
-                    Request->NextBodyChunk,
-                    Request->NextBodyChunkSize,
-                    NULL
-                );
+
+                if (
+                    !WinHttpReadData(
+                        Request->RequestHandle,
+                        Request->NextBodyChunk,
+                        Request->NextBodyChunkSize,
+                        NULL
+                    )
+                ) {
+                    AtomicExchangeU32(
+                        &Request->Status,
+                        WIN32_HTTP_REQUEST_STATUS_KIND_FAILED,
+                        MEM_ORDER_SEQ_CST
+                    );
+                }
             }
         }
 

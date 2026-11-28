@@ -76,5 +76,7 @@ b32 FLAPGraphColumnHas(FLAPGraphColumns const* Columns, u64 Column, OUT u64* Slo
 b32 FLAPGraphColumnsFromKey(Arena* MemPool, FLAPGraphColumns* Columns, FLAPGraphKey* Key, r1u64 View, Access* Acc, FLIParsed* FLI);
 b32 FLAPGraphProbeFromTimeRange(FLAPGraphColumns const* Columns, r1u64 TimeRangeUSecs, OUT FLAPGraphProbe* Probe);
 b32 FLAPGraphSampleNearTime(FLAPGraphColumns const* Columns, u64 TimeUSecs, u64 RadiusUSecs, OUT u64* SampleTimeUSecs);
+u64 FLAPGraphFitValueRange(FLAPGraphColumns const* Columns, r1u64 View, r1u64 TimeRangeUSecs, r1f32* Range, b32* HasRange);
+b32 FLAPGraphClipLine(r2f32 Rect, f64 Pad, f64* FromX, f64* FromY, f64* ToX, f64* ToY);
 
 #endif // __FLAP_GRAPH_H__

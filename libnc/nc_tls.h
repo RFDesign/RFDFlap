@@ -36,6 +36,8 @@ struct ThreadLocalStorage {
     struct EvalCache*            EVAL_CACHE;
     struct EvalInterpretContext* EVAL_INTERP_CTX;
     struct EVExpandRuleTable*    EV_VIEW_RULE_INFO_TABLE;
+    Arena*                       FLAP_EXPORT_PNG_MEMPOOL;
+    Arena*                       FLAP_MAP_IMAGE_MEMPOOL;
     Arena*                       ARENA_THREAD_SCRATCH_POOL[ARENA_SCRATCH_COUNT];
 };
 

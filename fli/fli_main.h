@@ -31,8 +31,7 @@ struct FLIFile {
     FLIFileFormatKind Format;
     Str8              Path;
     Str8              Data;
-    Handle            FileHandle;
-    Handle            MapHandle;
+    MappedFile        Mapped;
 };
 
 struct FLIFileNode {

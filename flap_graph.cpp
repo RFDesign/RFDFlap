@@ -96,7 +96,7 @@ FLAPGraphSampleValue(
             ];
         } else {
             *SampleValue = (f32) FLVColumnF64At(Value, Sample);
-            Result = (*SampleValue == *SampleValue);
+            Result = (*SampleValue * 0.0f == 0.0f);
         }
     }
 
@@ -179,7 +179,7 @@ FLAPGraphReduceSamples(
 
             f32 V = (f32) FLVColumnF64At(Value, Index);
 
-            if (V != V) {
+            if (V * 0.0f != 0.0f) {
                 IsBroken = TRUE;
                 continue;
             }
@@ -668,6 +668,118 @@ FLAPGraphSampleNearTime(
             *SampleTimeUSecs = SampleUSecs;
             Result = TRUE;
         }
+    }
+
+    return Result;
+}
+
+INTERNAL u64
+FLAPGraphFitValueRange(
+    FLAPGraphColumns const* Columns,
+    r1u64 View,
+    r1u64 TimeRangeUSecs,
+    r1f32* Range,
+    b32* HasRange
+) {
+    u64 Result = 0;
+
+    if (!Columns->Key.StepUSecs)
+        return Result;
+
+    for (u64 Column = View.Min; Column < View.Max; ++Column) {
+        u64 Slot = 0;
+
+        if (!FLAPGraphColumnHas(Columns, Column, &Slot))
+            continue;
+
+        Result += Columns->Samples[Slot];
+
+        if (!*HasRange) {
+            Range->Min = Columns->Min[Slot];
+            Range->Max = Columns->Max[Slot];
+            *HasRange = TRUE;
+        } else {
+            Range->Min = MIN(Range->Min, Columns->Min[Slot]);
+            Range->Max = MAX(Range->Max, Columns->Max[Slot]);
+        }
+    }
+
+    if (Columns->HasBridge) {
+        FLAPGraphEdge Lead = Columns->Lead;
+        FLAPGraphEdge Trail = Columns->Trail;
+        f64 Span = (f64) (Trail.TimeUSecs - Lead.TimeUSecs);
+        f32 Rise = Trail.Value - Lead.Value;
+        f32 Enter = Lead.Value + Rise * (f32) (
+            ((f64) TimeRangeUSecs.Min - (f64) Lead.TimeUSecs) / Span
+        );
+        f32 Leave = Lead.Value + Rise * (f32) (
+            ((f64) TimeRangeUSecs.Max - (f64) Lead.TimeUSecs) / Span
+        );
+
+        if (!*HasRange) {
+            Range->Min = MIN(Enter, Leave);
+            Range->Max = MAX(Enter, Leave);
+            *HasRange = TRUE;
+        } else {
+            Range->Min = MIN(Range->Min, MIN(Enter, Leave));
+            Range->Max = MAX(Range->Max, MAX(Enter, Leave));
+        }
+    }
+
+    return Result;
+}
+
+// NOTE(nc): the part of a line that is in the rect, with Pad more at each
+//         : side of it. an end of the line can be far from the rect, so
+//         : the line is cut in f64. the result is FALSE when no part of
+//         : the line is in the rect.
+INTERNAL b32
+FLAPGraphClipLine(
+    r2f32 Rect,
+    f64 Pad,
+    f64* FromX,
+    f64* FromY,
+    f64* ToX,
+    f64* ToY
+) {
+    f64 DeltaX = *ToX - *FromX;
+    f64 DeltaY = *ToY - *FromY;
+    f64 Deltas[4] = {
+        -DeltaX,
+        DeltaX,
+        -DeltaY,
+        DeltaY
+    };
+    f64 Distances[4] = {
+        *FromX - ((f64) Rect.X0 - Pad),
+        ((f64) Rect.X1 + Pad) - *FromX,
+        *FromY - ((f64) Rect.Y0 - Pad),
+        ((f64) Rect.Y1 + Pad) - *FromY
+    };
+    f64 Enter = 0.0;
+    f64 Leave = 1.0;
+    b32 IsVisible = TRUE;
+
+    for (u32 Index = 0; Index < 4 && IsVisible; ++Index) {
+        if (Deltas[Index] == 0.0) {
+            IsVisible = (Distances[Index] >= 0.0);
+        } else if (Deltas[Index] < 0.0) {
+            Enter = MAX(Enter, Distances[Index] / Deltas[Index]);
+        } else {
+            Leave = MIN(Leave, Distances[Index] / Deltas[Index]);
+        }
+    }
+
+    b32 Result = (IsVisible && Enter < Leave);
+
+    if (Result) {
+        f64 X = *FromX;
+        f64 Y = *FromY;
+
+        *FromX = X + Enter * DeltaX;
+        *FromY = Y + Enter * DeltaY;
+        *ToX = X + Leave * DeltaX;
+        *ToY = Y + Leave * DeltaY;
     }
 
     return Result;

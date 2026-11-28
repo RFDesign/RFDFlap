@@ -149,6 +149,48 @@ AppendFileContents(Str8 FilePath, Str8 Contents)
     return Result;
 }
 
+API_INTERNAL MappedFile
+MapFileContents(SystemAccessKind Access, Str8 FilePath)
+{
+    MappedFile Result = {};
+    Handle File = SystemOpenFile(Access, FilePath);
+    Handle Map = SystemOpenFileMap(SYS_ACCESS_READ, File);
+    FileProperties Props = SystemGetFileProperties(File);
+    void* View = SystemOpenFileMapView(
+        Map,
+        SYS_ACCESS_READ,
+        Rng(0ULL, Props.Size)
+    );
+
+    if (View) {
+        Result.File = File;
+        Result.Map = Map;
+        Result.Data = Str(
+            (u8*) View,
+            Props.Size
+        );
+    } else {
+        SystemCloseFileMap(Map);
+        SystemCloseFile(File);
+    }
+
+    return Result;
+}
+
+API_INTERNAL void
+UnmapFileContents(MappedFile File)
+{
+    if (File.Data.Size) {
+        SystemCloseFileMapView(
+            File.Map,
+            File.Data.Str,
+            Rng(0ULL, File.Data.Size)
+        );
+        SystemCloseFileMap(File.Map);
+        SystemCloseFile(File.File);
+    }
+}
+
 API_INTERNAL FileID
 GetFileID(Str8 FilePath)
 {

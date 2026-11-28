@@ -343,6 +343,9 @@
 #define GENERIC_EXECUTE                             0x20000000L
 #define GENERIC_ALL                                 0x10000000L
 
+#define MOVEFILE_REPLACE_EXISTING                   0x00000001L
+#define MOVEFILE_COPY_ALLOWED                       0x00000002L
+
 #define FIND_FIRST_EX_CASE_SENSITIVE                1
 #define FIND_FIRST_EX_LARGE_FETCH                   2
 #define FIND_FIRST_EX_ON_DISK_ENTRIES_ONLY          4
@@ -1260,11 +1263,13 @@
 #define KEY_WRITE                                   ((STANDARD_RIGHTS_WRITE | KEY_SET_VALUE | KEY_CREATE_SUB_KEY) & (~SYNCHRONIZE))
 #define KEY_ALL_ACCESS                              ((STANDARD_RIGHTS_ALL | KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_CREATE_SUB_KEY | KEY_ENUMERATE_SUB_KEYS | KEY_NOTIFY | KEY_CREATE_LINK) & (~SYNCHRONIZE))
 
-#define WINHTTP_CALLBACK_STATUS_REQUEST_ERROR       2097152U
-#define WINHTTP_CALLBACK_STATUS_REQUEST_SENT        32U
-#define WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE   131072U
-#define WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE      262144U
-#define WINHTTP_CALLBACK_STATUS_READ_COMPLETE       524288U
+#define WINHTTP_CALLBACK_STATUS_REQUEST_ERROR        2097152U
+#define WINHTTP_CALLBACK_STATUS_REQUEST_SENT         32U
+#define WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE    131072U
+#define WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE       262144U
+#define WINHTTP_CALLBACK_STATUS_READ_COMPLETE        524288U
+#define WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE 4194304U
+
 #define WINHTTP_ACCESS_TYPE_DEFAULT_PROXY           0
 #define WINHTTP_ACCESS_TYPE_NO_PROXY                1
 #define WINHTTP_ACCESS_TYPE_NAMED_PROXY             3
@@ -3367,6 +3372,7 @@ DLL_IMPORT                    BOOL                              WinHttpCloseHand
 DLL_IMPORT                    MMRESULT                     WINAPI  timeBeginPeriod(UINT uPeriod);
 DLL_IMPORT                    MMRESULT                     WINAPI  timeEndPeriod(UINT uPeriod);
 DLL_IMPORT                    BOOL                         WINAPI  SystemTimeToTzSpecificLocalTime(LPCVOID lpTimeZoneInformation, SYSTEMTIME const* lpUniversalTime, LPSYSTEMTIME lpLocalTime);
+DLL_IMPORT                    BOOL                         WINAPI  MoveFileExW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName, DWORD dwFlags);
 EXTERN_C_LINK_END
 
 // @runtime____________________________________________________________________

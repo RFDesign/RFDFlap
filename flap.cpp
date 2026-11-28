@@ -25,13 +25,12 @@
 #include "flap_widgets.h"
 #include "flap_export.h"
 #include "flap_views.h"
+#include "flap_raster.h"
+
+#include "cli_main.h"
 
 #include "fli.cpp"
 #include "fli_bin.cpp"
-
-#if defined(NC_FLI)
-    #include "fli_main.cpp"
-#endif
 
 #include "flv_intern.cpp"
 #include "flv_token.cpp"
@@ -56,6 +55,15 @@
 #include "flap_export_csv.cpp"
 #include "flap_export_txt.cpp"
 #include "flap_views.cpp"
+#include "flap_raster.cpp"
+
+#if defined(NC_FLI)
+    #include "fli_main.cpp"
+#endif
+
+#if defined(NC_CLI)
+    #include "cli_main.cpp"
+#endif
 
 #define FLAP_MAX_LANE_COUNT 256
 
@@ -655,8 +663,32 @@ AppViewUI(r2f32 Rect)
                                         );
                                         Str8 CmdName = Cmd->Head->String;
                                         EVRow* Row = NULL;
+                                        // NOTE(nc): no row is selected and the input is a
+                                        //         : folder, for a command that takes one. so
+                                        //         : the folder is the answer, and not the
+                                        //         : first file in it.
+                                        b32 IsFolderAccept = (
+                                            !SelectionTable.Min.Y &&
+                                            !SelectionTable.Max.Y &&
+                                            CmdName.Size &&
+                                            (
+                                                AppCommandKindInfoFromStr(CmdName)->Query.Kind &
+                                                APP_QUERY_KIND_ALLOW_FOLDERS
+                                            ) &&
+                                            Filter.Size &&
+                                            (
+                                                Filter.Str[Filter.Size - 1] == '/' ||
+                                                Filter.Str[Filter.Size - 1] == '\\'
+                                            )
+                                        );
 
-                                        if (
+                                        if (IsFolderAccept) {
+                                            Taken = TRUE;
+                                            AppCmd(
+                                                APP_COMMAND_KIND_COMPLETE_QUERY,
+                                                __Registers.FilePath = Filter
+                                            );
+                                        } else if (
                                             !SelectionTable.Min.Y &&
                                             !SelectionTable.Max.Y
                                         ) {
@@ -675,7 +707,7 @@ AppViewUI(r2f32 Rect)
                                             );
                                         }
 
-                                        if (Row->Eval.Expr != EMPTY_EVAL_EXPR_VALUE) {
+                                        if (Row && Row->Eval.Expr != EMPTY_EVAL_EXPR_VALUE) {
                                             Taken = TRUE;
 
                                             EvalEval Eval = Row->Eval;
@@ -3590,7 +3622,11 @@ ASYNC_THREAD_FUNC_SIG(EntryPoint)
             }
 
             AtomicExchangeU32(&ASYNC_LOOP_REPEAT, 0, MEM_ORDER_SEQ_CST);
-            AtomicExchangeU32(&ASYNC_LOOP_REPEAT_HIGH_PRIORITY, 0, MEM_ORDER_SEQ_CST);
+            AtomicExchangeU32(
+                &ASYNC_LOOP_REPEAT_HIGH_PRIORITY, 
+                0, 
+                MEM_ORDER_SEQ_CST
+            );
         }
 
         LaneSync();
@@ -3599,7 +3635,11 @@ ASYNC_THREAD_FUNC_SIG(EntryPoint)
         FSAsyncTick();
         LogAsyncTick();
         FLIAsyncTick();
-        // HTTPAsyncTick();
+
+    #if defined(NC_OS_WIN) && !defined(NC_CLI) && !defined(NC_FLI)
+        HTTPAsyncTick();
+    #endif
+
         LaneSync();
 
         b32 ShouldQuit = FALSE;
@@ -3621,10 +3661,16 @@ EntryPoint(CommandLine* CLI)
 #if defined(NC_FLI)
     FLIEntryPoint(CLI);
 #elif defined(NC_CLI)
-    PrintOut("Hello, World!\n");
+    FLVCompilerInit();
+    CLIEntryPoint(CLI);
 #else
     // SockInit();
-    // HTTPInit();
+
+#if defined (NC_OS_WIN)
+    HTTPInit();
+    FLAPMapInit();
+#endif
+
     MDInit();
     ConfigInit();
     FLVCompilerInit();

@@ -99,6 +99,61 @@ FLVBuiltin const FLV_STDLIB_TEMPLATE[FLV_STDLIB_ID_COUNT] = {
         Str8Lit("duration"),
         FLV_SIGNATURE_KIND_SELECTION_TO_DURATION,
         FALSE
+    },
+    {
+        Str8Lit("sqrt"),
+        FLV_SIGNATURE_KIND_SERIES_TO_SERIES_F64,
+        TRUE
+    },
+    {
+        Str8Lit("sqrt"),
+        FLV_SIGNATURE_KIND_F64_TO_F64,
+        TRUE
+    },
+    {
+        Str8Lit("contains"),
+        FLV_SIGNATURE_KIND_TEXT_TO_MASK,
+        FALSE
+    },
+    {
+        Str8Lit("close_gaps"),
+        FLV_SIGNATURE_KIND_SELECTION_DURATION_TO_SELECTION,
+        FALSE
+    },
+    {
+        Str8Lit("drop_short"),
+        FLV_SIGNATURE_KIND_SELECTION_DURATION_TO_SELECTION,
+        FALSE
+    },
+    {
+        Str8Lit("touching"),
+        FLV_SIGNATURE_KIND_SELECTION_SELECTION_TO_SELECTION,
+        FALSE
+    },
+    {
+        Str8Lit("before"),
+        FLV_SIGNATURE_KIND_SELECTION_SELECTION_TO_SELECTION,
+        FALSE
+    },
+    {
+        Str8Lit("after"),
+        FLV_SIGNATURE_KIND_SELECTION_SELECTION_TO_SELECTION,
+        FALSE
+    },
+    {
+        Str8Lit("count"),
+        FLV_SIGNATURE_KIND_SELECTION_TO_I64,
+        FALSE
+    },
+    {
+        Str8Lit("start"),
+        FLV_SIGNATURE_KIND_SELECTION_TO_DURATION,
+        FALSE
+    },
+    {
+        Str8Lit("end"),
+        FLV_SIGNATURE_KIND_SELECTION_TO_DURATION,
+        FALSE
     }
 };
 
@@ -257,6 +312,41 @@ SignatureFromKind(FLVSignatureKind Kind)
             Signature[0] = TypeDuration();
             Signature[1] = TypeSelection(M);
         } break;
+
+        case FLV_SIGNATURE_KIND_F64_TO_F64: {
+            Signature[0].V = BUILTIN_f64;
+            Signature[1].V = BUILTIN_f64;
+        } break;
+
+        case FLV_SIGNATURE_KIND_TEXT_TO_MASK: {
+            TypeIndex Bool = {
+                BUILTIN_b32
+            };
+
+            Signature[0] = TypeSeries(Bool, M);
+            Signature[1] = TypeSeries(TypeString(), M);
+            Signature[2] = TypeString();
+            ParamsCount = 2;
+        } break;
+
+        case FLV_SIGNATURE_KIND_SELECTION_DURATION_TO_SELECTION: {
+            Signature[0] = TypeSelection(M);
+            Signature[1] = TypeSelection(M);
+            Signature[2] = TypeDuration();
+            ParamsCount = 2;
+        } break;
+
+        case FLV_SIGNATURE_KIND_SELECTION_SELECTION_TO_SELECTION: {
+            Signature[0] = TypeSelection(M);
+            Signature[1] = TypeSelection(M);
+            Signature[2] = TypeSelection(T);
+            ParamsCount = 2;
+        } break;
+
+        case FLV_SIGNATURE_KIND_SELECTION_TO_I64: {
+            Signature[0].V = BUILTIN_i64;
+            Signature[1] = TypeSelection(M);
+        } break;
     }
 
     return TypeFunc(Signature, ParamsCount);
@@ -272,6 +362,7 @@ FLVStdLibInit(void)
     };
     NameIndex FlightName = InternName(Names, "flight"_s8);
     NameIndex ArmedName = InternName(Names, "armed"_s8);
+    NameIndex RangeName = InternName(Names, "range"_s8);
     NameIndex FuncNames[FLV_STDLIB_ID_COUNT] = {};
 
     for (u32 Index = 0; Index < FLV_STDLIB_ID_COUNT; ++Index)
@@ -306,4 +397,15 @@ FLVStdLibInit(void)
     );
 
     ASSERT_ALWAYS(FLV_STDLIB_ARMED.V != BINDING_INVALID_VALUE);
+
+    // NOTE(nc): the range of a row, in a write that has ranges
+    FLV_STDLIB_RANGE = AddBinding(
+        Root,
+        RangeName,
+        NoDecl,
+        TypeSelection(FLV_STDLIB_FLIGHT),
+        BINDING_KIND_VALUE
+    );
+
+    ASSERT_ALWAYS(FLV_STDLIB_RANGE.V != BINDING_INVALID_VALUE);
 }

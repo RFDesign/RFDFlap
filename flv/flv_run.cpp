@@ -3,6 +3,7 @@
 #include "nc_memory.h"
 #include "nc_arena.h"
 #include "nc_string.h"
+#include "nc_simd.h"
 
 #include "fli.h"
 
@@ -33,6 +34,15 @@ FLVColumnInit(
 
     Column->Data = Section.Data;
     Column->Deltas = NULL;
+
+    ASSERT(
+        !Column->Deltas ||
+        Section.Size >= (
+            FLITimeBlockCount(Column->Count) * sizeof(u64) +
+            Column->Count * sizeof(u32)
+        )
+    );
+
     Column->Scale = Record->Multiplier;
     Column->Constant = Record->Min;
     Column->Kind = Record->Kind;
@@ -125,7 +135,7 @@ FLVLaneInit(
         Program->EmitCount
     );
 
-    for (u32 Index = 0; Index < Program->EmitCount; ++Index) {
+    for (u32 Index = 0; Index < Program->EmitCount; ) {
         FLVEmit const* Emit = &Program->Emits[Index];
         u32 Head = Index;
 
@@ -161,8 +171,11 @@ FLVLaneInit(
     for (u32 Index = 0; Index < SlotsCount; ++Index) {
         FLVBoundSlot const* Slot = &Slots[Index];
 
-        if (Slot->IsMissing)
+        if (Slot->IsMissing) {
+            Lane->Columns[Index].IsMissing = TRUE;
+
             continue;
+        }
 
         if (Slot->TimeColumn != FLV_COLUMN_NONE) {
             Result &= FLVColumnInit(
@@ -342,12 +355,46 @@ FLVChunkTimeDecode(FLVLane* Lane)
 
     if (Time->Encoding == FLI_COLUMN_ENCODING_DELTA_TIME) {
         u64* Dst = Lane->ChunkTimeDecode;
+        u64 Count = Lane->ChunkCount;
 
-        for (u64 Index = 0; Index < Lane->ChunkCount; ++Index) {
+#if FLV_KERNEL_SIMD
+        // NOTE(nc): the samples of a time block have one base, so a block
+        //         : is one run of deltas added to it. a column has no
+        //         : delta after its last one, so the tail of a run is
+        //         : not read wide.
+        for (u64 Index = 0; Index < Count; ) {
+            u64 Sample = Base + Index;
+            u64 Block = Sample >> FLI_TIME_BLOCK_SHIFT;
+            u64 BlockEnd = (Block + 1) << FLI_TIME_BLOCK_SHIFT;
+            u64 Run = MIN(BlockEnd - Sample, Count - Index);
+            u32 const* Deltas = Time->Deltas + Sample;
+            u64* Out = Dst + Index;
+            v256 Wide = _mm256_set1_epi64x((i64) Data[Block]);
+            u64 At = 0;
+
+            for ( ; At + FLV_WIDE <= Run; At += FLV_WIDE) {
+                v256 Delta = _mm256_cvtepu32_epi64(
+                    _mm_loadu_si128((v128 const*) (Deltas + At))
+                );
+
+                _mm256_storeu_si256(
+                    (v256*) (Out + At),
+                    _mm256_add_epi64(Wide, Delta)
+                );
+            }
+
+            for ( ; At < Run; ++At)
+                Out[At] = Data[Block] + Deltas[At];
+
+            Index += Run;
+        }
+#else
+        for (u64 Index = 0; Index < Count; ++Index) {
             u64 Sample = Base + Index;
 
             Dst[Index] = Data[Sample >> FLI_TIME_BLOCK_SHIFT] + Time->Deltas[Sample];
         }
+#endif
 
         Lane->ChunkTime = Dst;
     }
@@ -426,6 +473,15 @@ FLVRegionScalar(FLVLane* Lane, FLVRegion const* Region)
     Lane->Region = Region;
     Lane->ChunkBase = 0;
     Lane->ChunkCount = 0;
+
+    // NOTE(nc): a region in a loop runs more than one time, so a temp
+    //         : that was missing the time before is not missing now
+    for (u32 Index = 0; Index < Region->OpCount; ++Index) {
+        FLVOperand Dst = Program->Ops[Region->HeadOp + Index].Dst;
+
+        if (FLVGetOperandKind(Dst) == FLV_OPERAND_KIND_TEMP)
+            Lane->MissingTemps &= ~(1ULL << FLVGetOperandIndex(Dst));
+    }
 
     for (u32 OpIndex = 0; OpIndex < Region->OpCount; ++OpIndex) {
         FLVOp Op = Program->Ops[Region->HeadOp + OpIndex];
@@ -758,6 +814,20 @@ FLVRenderItemsPrint(
                         )
                     );
                 }
+            } break;
+
+            case FLV_RENDER_KIND_MAP: {
+                ListPush(
+                    MemPool,
+                    &Result,
+                    ArenaPushStrFmt(
+                        MemPool,
+                        "  emit %u \"%S\": map, %llu ranges",
+                        Index,
+                        PRINT_STR(Label),
+                        Item->Map.Count
+                    )
+                );
             } break;
 
             case FLV_RENDER_KIND_TABLE: {

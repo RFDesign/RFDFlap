@@ -28,17 +28,89 @@ OCInit(void)
     OC_SHARED->CancelThreadSemaphore = SemaphoreAlloc(0, 1, {});
 }
 
-OCObject 
-__OCObjectFromKey(Access* Acc, Str8 Key, OCObjectParams* Params, u64 EndTimeUSecs)
+// NOTE(nc): the caller has a lock of the stripe. a touch is made under the
+//         : read lock, so no reference under the write lock means that no
+//         : one has a value of the node.
+INTERNAL b32
+OCNodeCanReleaseRetired(OCNode* Node)
 {
-    OCRequestBatch* RequestBatch = &OC_SHARED->RequestBatches[Params->Flags & OC_HIGH_PRIORITY ? 0 : 1];
+    b32 Result = FALSE;
+
+    if (!AtomicLoadU64(&Node->Point.ReferenceCount, MEM_ORDER_SEQ_CST)) {
+        for (OCRetired* R = Node->Retired; R && !Result; R = R->Next)
+            Result = R->IsUsed;
+    }
+
+    return Result;
+}
+
+INTERNAL void
+OCNodeReleaseRetired(OCCache* Cache, OCNode* Node)
+{
+    for (OCRetired* R = Node->Retired; R; R = R->Next) {
+        if (!R->IsUsed)
+            continue;
+
+        if (Cache->DestroyFunc)
+            Cache->DestroyFunc(R->V);
+
+        R->IsUsed = FALSE;
+    }
+}
+
+// NOTE(nc): the caller has the write lock of the stripe. the value that
+//         : the new one takes the place of is destroyed now if no one has
+//         : it, or else it waits on the node for the tick that finds no
+//         : reference.
+INTERNAL void
+OCNodeStoreValue(OCCache* Cache, Stripe* S, OCNode* Node, OCObject Value)
+{
+    if (AtomicLoadU64(&Node->CompletionCount, MEM_ORDER_SEQ_CST)) {
+        if (!AtomicLoadU64(&Node->Point.ReferenceCount, MEM_ORDER_SEQ_CST)) {
+            if (Cache->DestroyFunc)
+                Cache->DestroyFunc(Node->V);
+        } else {
+            OCRetired* R = Node->Retired;
+
+            for ( ; R && R->IsUsed; R = R->Next);
+
+            if (!R) {
+                R = ArenaPushArrayZero(S->MemPool, OCRetired, 1);
+                SLL_STACK_PUSH(Node->Retired, R);
+            }
+
+            R->V = Node->V;
+            R->IsUsed = TRUE;
+        }
+    }
+
+    Node->V = Value;
+}
+
+OCObject 
+__OCObjectFromKey(
+    Access* Acc, 
+    Str8 Key, 
+    OCObjectParams* Params, 
+    u64 EndTimeUSecs
+) {
+    OCRequestBatch* RequestBatch = &OC_SHARED->RequestBatches[
+        !(Params->Flags & OC_HIGH_PRIORITY)
+    ];
     OCCache* Cache = NULL;
     u64 CacheHash = Hash(Str8Struct(&Params->CreateFunc));
     u64 CacheSlotIndex = CacheHash % OC_SHARED->CacheSlotsCount;
-    Stripe* CacheStripe = StripeFromSlotIndex(&OC_SHARED->CacheStripes, CacheSlotIndex);
+    Stripe* CacheStripe = StripeFromSlotIndex(
+        &OC_SHARED->CacheStripes, 
+        CacheSlotIndex
+    );
 
     LOCK_SCOPE_R(CacheStripe->RWMtx) {
-        for (OCCache* C = OC_SHARED->CacheSlots[CacheSlotIndex]; C; C = C->Next) {
+        for (
+            OCCache* C = OC_SHARED->CacheSlots[CacheSlotIndex]; 
+            C; 
+            C = C->Next
+        ) {
             if (C->CreateFunc == Params->CreateFunc) {
                 Cache = C;
                 break;
@@ -48,7 +120,11 @@ __OCObjectFromKey(Access* Acc, Str8 Key, OCObjectParams* Params, u64 EndTimeUSec
 
     if (!Cache) {
         LOCK_SCOPE_W(CacheStripe->RWMtx) {
-            for (OCCache* C = OC_SHARED->CacheSlots[CacheSlotIndex]; C; C = C->Next) {
+            for (
+                OCCache* C = OC_SHARED->CacheSlots[CacheSlotIndex]; 
+                C; 
+                C = C->Next
+            ) {
                 if (C->CreateFunc == Params->CreateFunc) {
                     Cache = C;
                     break;
@@ -89,10 +165,15 @@ __OCObjectFromKey(Access* Acc, Str8 Key, OCObjectParams* Params, u64 EndTimeUSec
                     MEM_ORDER_SEQ_CST
                 );
 
-                b32 IsStale = (Node->LastCompletedGeneration != Params->Generation);
+                b32 IsStale = (
+                    Node->LastCompletedGeneration != Params->Generation
+                );
 
                 if (
-                    AtomicLoadU64(&Node->CompletionCount, MEM_ORDER_SEQ_CST) && 
+                    AtomicLoadU64(
+                        &Node->CompletionCount, 
+                        MEM_ORDER_SEQ_CST
+                    ) && 
                     (
                         !IsStale || 
                         !(Params->Flags & OC_WAIT_FOR_FRESH)
@@ -107,8 +188,8 @@ __OCObjectFromKey(Access* Acc, Str8 Key, OCObjectParams* Params, u64 EndTimeUSec
                 if (IsStale) {
                     b32 GotTask = !AtomicCASU64(
                         &Node->WorkingCount, 
-                        1, 
                         0, 
+                        1, 
                         MEM_ORDER_SEQ_CST, 
                         MEM_ORDER_SEQ_CST
                     );
@@ -135,15 +216,22 @@ __OCObjectFromKey(Access* Acc, Str8 Key, OCObjectParams* Params, u64 EndTimeUSec
                 }
 
                 if (!Node) {
+                    OCRetired* Retired = NULL;
+
                     NeedRequest = TRUE;
                     Node = (OCNode*) S->Free;
 
-                    if (Node)
+                    // NOTE(nc): a node from the free list keeps its list
+                    //         : of retired values, which are all free
+                    if (Node) {
                         S->Free = Node->Next;
-                    else
+                        Retired = Node->Retired;
+                    } else {
                         Node = ArenaPushArray(S->MemPool, OCNode, 1);
+                    }
 
                     MemSet(Node, 0, sizeof(*Node));
+                    Node->Retired = Retired;
                     DLL_PUSH_BACK(Slot->Head, Slot->Tail, Node);
                     Node->Key = ArenaPushStrCpy(S->MemPool, Key);
                     Node->WorkingCount = 1;
@@ -157,18 +245,34 @@ __OCObjectFromKey(Access* Acc, Str8 Key, OCObjectParams* Params, u64 EndTimeUSec
                     NeedRequest = FALSE;
 
                     LOCK_SCOPE(RequestBatch->Mtx) {
-                        OCRequestNode* N = ArenaPushArrayZero(RequestBatch->MemPool, OCRequestNode, 1);
+                        OCRequestNode* N = ArenaPushArrayZero(
+                            RequestBatch->MemPool, 
+                            OCRequestNode, 
+                            1
+                        );
 
                         if (Params->Flags & OC_WIDE) {
-                            SLL_QUEUE_PUSH(RequestBatch->HeadWide, RequestBatch->TailWide, N);
+                            SLL_QUEUE_PUSH(
+                                RequestBatch->HeadWide, 
+                                RequestBatch->TailWide, 
+                                N
+                            );
                             ++RequestBatch->WideCount;
                         } else {
-                            SLL_QUEUE_PUSH(RequestBatch->HeadThin, RequestBatch->TailThin, N);
+                            SLL_QUEUE_PUSH(
+                                RequestBatch->HeadThin, 
+                                RequestBatch->TailThin, 
+                                N
+                            );
                             ++RequestBatch->ThinCount;
                         }
 
-                        N->V.Key = ArenaPushStrCpy(RequestBatch->MemPool, Key);
+                        N->V.Key = ArenaPushStrCpy(
+                            RequestBatch->MemPool, 
+                            Key
+                        );
                         N->V.Generation = Params->Generation;
+                        Node->Cancelled = FALSE;
                         N->V.CancelSignal = &Node->Cancelled;
                         N->V.CreateFunc = Params->CreateFunc;
                     }
@@ -247,8 +351,11 @@ OCAsyncTick(void)
                             LOCK_SCOPE_R(S->RWMtx) {
                                 for (OCNode* N = Slot->Head; N; N = N->Next) {
                                     if (
-                                        AccessPointIsExpired(&N->Point, __Params.Time = N->EvictionThresholdUSecs) &&
-                                        !AtomicLoadU64(&N->WorkingCount, MEM_ORDER_SEQ_CST)
+                                        (
+                                            AccessPointIsExpired(&N->Point, __Params.Time = N->EvictionThresholdUSecs) &&
+                                            !AtomicLoadU64(&N->WorkingCount, MEM_ORDER_SEQ_CST)
+                                        ) ||
+                                        OCNodeCanReleaseRetired(N)
                                     ) {
                                         SlotHasWork = TRUE;
                                         break;
@@ -263,6 +370,11 @@ OCAsyncTick(void)
                                     N = Next
                                 ) {
                                     Next = N->Next;
+
+                                    if (OCNodeCanReleaseRetired(N)) {
+                                        SlotHasWork = TRUE;
+                                        OCNodeReleaseRetired(Cache, N);
+                                    }
 
                                     if (
                                         AccessPointIsExpired(&N->Point, __Params.Time = N->EvictionThresholdUSecs) &&
@@ -549,7 +661,7 @@ OCAsyncTick(void)
                     for (OCNode* N = Slot->Head; N; N = N->Next) {
                         if (StrMatch(N->Key, R->Key, 0)) {
                             N->LastCompletedGeneration = Gen;
-                            N->V = Val;
+                            OCNodeStoreValue(Cache, S, N, Val);
                             AtomicSubFetchU64(&N->WorkingCount, 1, MEM_ORDER_SEQ_CST);
                             AtomicAddFetchU64(&N->CompletionCount, 1, MEM_ORDER_SEQ_CST);
 
@@ -576,7 +688,11 @@ OCAsyncTick(void)
             LOCK_SCOPE(Batch->Mtx) {
                 for (u64 Idx = DoneWideCount; Idx < Task->WideCount; ++Idx) {
                     OCRequest* R = &Task->Wide[Idx];
-                    OCRequestNode* N = ArenaPushArray(Batch->MemPool, OCRequestNode, 1);
+                    OCRequestNode* N = ArenaPushArray(
+                        Batch->MemPool, 
+                        OCRequestNode, 
+                        1
+                    );
 
                     SLL_QUEUE_PUSH(Batch->HeadWide, Batch->TailWide, N);
                     ++Batch->WideCount;
@@ -586,7 +702,11 @@ OCAsyncTick(void)
 
                 for (u64 Idx = DoneThinCount; Idx < Task->ThinCount; ++Idx) {
                     OCRequest* R = &Task->Thin[Idx];
-                    OCRequestNode* N = ArenaPushArray(Batch->MemPool, OCRequestNode, 1);
+                    OCRequestNode* N = ArenaPushArray(
+                        Batch->MemPool, 
+                        OCRequestNode, 
+                        1
+                    );
 
                     SLL_QUEUE_PUSH(Batch->HeadThin, Batch->TailThin, N);
                     ++Batch->ThinCount;
@@ -595,8 +715,13 @@ OCAsyncTick(void)
                 }
             }
 
-            if (NeedAnotherTry)
-                AtomicExchangeU32(&ASYNC_LOOP_REPEAT, TRUE, MEM_ORDER_SEQ_CST);
+            if (NeedAnotherTry) {
+                AtomicExchangeU32(
+                    &ASYNC_LOOP_REPEAT, 
+                    TRUE, 
+                    MEM_ORDER_SEQ_CST
+                );
+            }
         }
 
         LaneSync();

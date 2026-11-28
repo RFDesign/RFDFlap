@@ -18,6 +18,12 @@
 #define BIN_GPS_WEEK_SECS       604800ULL
 #define BIN_GPS_LEAP_SECS       18ULL
 
+#define BIN_CMD_ID_NAV_LAND      21
+#define BIN_INSTANCE_COUNT       256
+#define BIN_EARTH_RADIUS_METRES  6378100.0
+#define BIN_DERIVED_FORMAT_CHAR  '~'
+#define B2F_DERIVED_MAX          4
+
 typedef u32 B2FSpecialKind;
 enum : u32 {
     B2F_SPECIAL_KIND_NONE,
@@ -33,6 +39,16 @@ enum : u32 {
     B2F_SPECIAL_KIND_COUNT
 };
 
+typedef u8 B2FDerivedKind;
+enum : u8 {
+    B2F_DERIVED_KIND_NULL,
+    B2F_DERIVED_KIND_NORTH,
+    B2F_DERIVED_KIND_EAST,
+    B2F_DERIVED_KIND_DIST,
+    B2F_DERIVED_KIND_PREV,
+    B2F_DERIVED_KIND_COUNT
+};
+
 // @types______________________________________________________________________
 struct B2FConvertParams {
     Str8 InputBINName;
@@ -43,6 +59,28 @@ struct B2FFormatCharInfo {
     FLIScalarKind Kind;
     u8            Size;
     f64           Scale;
+};
+
+struct B2FDerivedInfo {
+    Str8          Name;
+    Str8          Unit;
+    FLIScalarKind Kind;
+};
+
+struct B2FPositionState {
+    f64 Lat;
+    f64 Lng;
+    f64 North;
+    f64 East;
+    f64 Dist;
+    b32 HasPosition;
+    u32 __Padding;
+};
+
+struct B2FParamSlot {
+    u8  Name[16];
+    f32 Value;
+    b32 IsUsed;
 };
 
 struct B2FOffsetChunk {
@@ -67,6 +105,15 @@ struct B2FFormat {
     u32                 MSecsField;
     u32                 StatusField;
     b32                 HasClock;
+    b32                 IsGPS;
+    b32                 HasPosition;
+    u32                 LatField;
+    u32                 LngField;
+    u32                 CommandField;
+    u32                 NameField;
+    u32                 ValueField;
+    u32                 DerivedCount;
+    B2FDerivedKind      DerivedKinds[B2F_DERIVED_MAX];
     Str8                FieldNames[BIN_MAX_FIELD_COUNT];
     u8                  FieldChars[BIN_MAX_FIELD_COUNT];
     u8                  FieldOffsets[BIN_MAX_FIELD_COUNT];
@@ -80,5 +127,6 @@ struct B2FFormat {
 
 // @functions__________________________________________________________________
 FLIBakeParams B2FConvert(Arena* MemPool, B2FConvertParams* Params);
+void B2FMD5ThreadEntryPoint(void* __Params);
 
 #endif // __FLI_BIN_H__

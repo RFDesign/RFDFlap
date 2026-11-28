@@ -1553,7 +1553,7 @@ MQTTStrRawFromStr8(Arena* MemPool, Str8 String)
     }
 #endif
 
-internal force_inline char*
+INTERNAL char*
 U64ToCStr(u64 Val, char* BufferEnd)
 {
     char* BufferEndPtr = BufferEnd;
@@ -1866,8 +1866,17 @@ __VSNPrintf(char* Buffer, u64 BufferCount, char const* Fmt, va_list Args)
 
                 char TempBuffer[32];
                 char const* String = U64ToCStr(Val, TempBuffer + sizeof(TempBuffer));
+                i32 ValLen = (i32) ((TempBuffer + sizeof(TempBuffer) - 1) - String);
 
-                __VSN_WRITE_STR(String, (TempBuffer + sizeof(TempBuffer) - 1) - String);
+                if (!HaveMinus && Width > ValLen)
+                    for (i32 Index = 0; Index < Width - ValLen; ++Index)
+                        __VSN_WRITE_CHAR(HaveZero ? '0' : ' ');
+
+                __VSN_WRITE_STR(String, ValLen);
+
+                if (HaveMinus && Width > ValLen)
+                    for (i32 Index = 0; Index < Width - ValLen; ++Index)
+                        __VSN_WRITE_CHAR(' ');
             } break;
 
             case 'x':
