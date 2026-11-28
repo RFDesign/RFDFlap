@@ -198,58 +198,33 @@ FLIThreadEntryPoint(void* __Params)
                 continue;
             }
  
+            MappedFile Mapped = {};
             Str8 FileData = {};
-            Handle FileHandle = {};
-            Handle MapHandle = {};
-            b32 IsMapped = FALSE;
- 
+
             if (FileProps.Size > MB(100)) {
-                Handle File = SystemOpenFile(
+                Mapped = MapFileContents(
                     SYS_ACCESS_READ | SYS_ACCESS_SHARE_READ,
                     Node->String
                 );
- 
-                if (File != EMPTY_HANDLE_VALUE) {
-                    Handle Map = SystemOpenFileMap(SYS_ACCESS_READ, File);
- 
-                    if (Map != EMPTY_HANDLE_VALUE) {
-                        void* View = SystemOpenFileMapView(
-                            Map,
-                            SYS_ACCESS_READ,
-                            Rng(0ULL, FileProps.Size)
-                        );
- 
-                        if (View) {
-                            FileData = Str((u8*)View, FileProps.Size);
-                            FileHandle = File;
-                            MapHandle = Map;
-                            IsMapped = TRUE;
- 
-                            PrintOut(
-                                "memory mapped %S (%llu MB)\n",
-                                PRINT_STR(Node->String),
-                                FileProps.Size / MB(1)
-                            );
-                        } else {
-                            SystemCloseFileMap(Map);
-                            SystemCloseFile(File);
-                        }
-                    } else {
-                        SystemCloseFile(File);
-                    }
-                }
+                FileData = Mapped.Data;
             }
- 
-            if (!IsMapped)
+
+            if (FileData.Size) {
+                PrintOut(
+                    "memory mapped %S (%llu MB)\n",
+                    PRINT_STR(Node->String),
+                    FileProps.Size / MB(1)
+                );
+            } else {
                 FileData = ReadFileContents(MemPool, Node->String);
- 
+            }
+
             FLIFile* InputFile = ArenaPushArrayZero(MemPool, FLIFile, 1);
  
             InputFile->Format = FileFormat;
             InputFile->Path = ArenaPushStrCpy(MemPool, Node->String);
             InputFile->Data = FileData;
-            InputFile->FileHandle = FileHandle;
-            InputFile->MapHandle = MapHandle;
+            InputFile->Mapped = Mapped;
             FLIFileListPush(MemPool, &FLI_MAIN_SHARED->InputFiles, InputFile);
             ReleaseScratch(Scratch);
         }
@@ -453,7 +428,7 @@ FLIThreadEntryPoint(void* __Params)
  
                 if (!LaneIndex()) {
                     Str8 ThisOutputPath = OutputPath;
- 
+
                     if (!ThisOutputPath.Size) {
                         ThisOutputPath = PathReplaceFileExtension(
                             Scratch.MemPool, 
@@ -461,17 +436,9 @@ FLIThreadEntryPoint(void* __Params)
                             "fli"_s8
                         );
                     }
- 
-                    Str8List FileBlobs = FLIFileBlobsFromSectionBundle(
-                        Scratch.MemPool,
-                        &Bundle
-                    );
- 
-                    b32 WriteOkay = WriteFileContents(
-                        ThisOutputPath,
-                        FileBlobs
-                    );
- 
+
+                    b32 WriteOkay = FLIWriteSectionBundle(ThisOutputPath, &Bundle);
+
                     if (WriteOkay) {
                         PrintOut(
                             "output written to %S\n",
@@ -545,17 +512,7 @@ FLIThreadEntryPoint(void* __Params)
                 }
  
                 LaneSync();
- 
-                if (BINFile->MapHandle != EMPTY_HANDLE_VALUE) {
-                    SystemCloseFileMapView(
-                        BINFile->MapHandle, 
-                        BINFile->Data.Str, 
-                        Rng(0ULL, BINFile->Data.Size)
-                    );
-                    SystemCloseFileMap(BINFile->MapHandle);
-                    SystemCloseFile(BINFile->FileHandle);
-                }
- 
+                UnmapFileContents(BINFile->Mapped);
                 LaneSync();
                 ReleaseScratch(Scratch);
             }

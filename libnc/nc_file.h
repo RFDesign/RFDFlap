@@ -44,6 +44,12 @@ struct FileID {
     u64 V[3];
 };
 
+struct MappedFile {
+    Handle File;
+    Handle Map;
+    Str8   Data;
+};
+
 #if defined(NC_OS_WIN)
     struct WinFileIter;
 #elif defined(NC_OS_LINUX)
@@ -81,6 +87,8 @@ Str8 ReadFileContents(Arena* MemPool, Str8 FilePath);
 b32 WriteFileContents(Str8 FilePath, Str8 Contents);
 b32 WriteFileContents(Str8 FilePath, Str8List ContentList);
 b32 AppendFileContents(Str8 FilePath, Str8 Contents);
+MappedFile MapFileContents(SystemAccessKind Access, Str8 FilePath);
+void UnmapFileContents(MappedFile File);
 FileID GetFileID(Str8 FilePath);
 b32 SystemCreateDirectory(Str8 DirPath);
 b32 SystemMoveFile(Str8 DstPath, Str8 FilePath);

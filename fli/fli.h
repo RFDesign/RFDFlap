@@ -365,10 +365,7 @@ struct FLINode {
     FLINode*       Next;
     FLINode*       Prev;
     FLIKey         Key;
-    Handle         File;
-    Handle         FileMap;
-    void*          FileBase;
-    FileProperties FileProps;
+    MappedFile     Mapped;
     Arena*         MemPool;
     FLIParsed      FLI;
     AccessPoint    Acc;
@@ -1192,7 +1189,7 @@ FLIBakeSection* FLIBakeSectionListPushNewUnpacked(Arena* MemPool, FLIBakeSection
 void FLIBakeSectionListCat(FLIBakeSectionList* Dst, FLIBakeSectionList* ToPush);
 FLISerialisedSection FLISerialisedSectionMakeUnpacked(void* Data, u64 Size);
 FLISerialisedSectionBundle FLISerialisedSectionBundleFromBakeResults(Arena* MemPool, FLIBakeResults* Results);
-Str8List FLIFileBlobsFromSectionBundle(Arena* MemPool, FLISerialisedSectionBundle* Bundle);
+b32 FLIWriteSectionBundle(Str8 FilePath, IN FLISerialisedSectionBundle* Bundle);
 FLIBakeResults FLIBake(Arena* MemPool, FLIBakeParams* Params);
 FLISerialisedSectionBundle FLICompress(Arena* MemPool, IN FLISerialisedSectionBundle* Bundle);
 u64 FLITimeBlockCount(u64 Count);

@@ -386,45 +386,20 @@ CLICheckFLIHeaders(void)
     }
 }
 
-// NOTE(nc): a large file is mapped and a small one is read, as fli_main
-//         : does. the result is NULL when the file has no data.
 INTERNAL FLIFile*
 CLIFileOpen(Arena* MemPool, Str8 Path)
 {
     FLIFile* Result = NULL;
-    Str8 Data = {};
-    Handle FileHandle = {};
-    Handle MapHandle = {};
     FileProperties Props = SystemGetFileProperties(Path);
+    MappedFile Mapped = {};
+    Str8 Data = {};
 
     if (Props.Size > MB(100)) {
-        Handle File = SystemOpenFile(
+        Mapped = MapFileContents(
             SYS_ACCESS_READ | SYS_ACCESS_SHARE_READ,
             Path
         );
-
-        if (File != EMPTY_HANDLE_VALUE) {
-            Handle Map = SystemOpenFileMap(SYS_ACCESS_READ, File);
-
-            if (Map != EMPTY_HANDLE_VALUE) {
-                void* View = SystemOpenFileMapView(
-                    Map,
-                    SYS_ACCESS_READ,
-                    Rng(0ULL, Props.Size)
-                );
-
-                if (View) {
-                    Data = Str((u8*) View, Props.Size);
-                    FileHandle = File;
-                    MapHandle = Map;
-                } else {
-                    SystemCloseFileMap(Map);
-                    SystemCloseFile(File);
-                }
-            } else {
-                SystemCloseFile(File);
-            }
-        }
+        Data = Mapped.Data;
     }
 
     if (!Data.Size && Props.Size)
@@ -434,25 +409,10 @@ CLIFileOpen(Arena* MemPool, Str8 Path)
         Result = ArenaPushArrayZero(MemPool, FLIFile, 1);
         Result->Path = Path;
         Result->Data = Data;
-        Result->FileHandle = FileHandle;
-        Result->MapHandle = MapHandle;
+        Result->Mapped = Mapped;
     }
 
     return Result;
-}
-
-INTERNAL void
-CLIFileClose(FLIFile* File)
-{
-    if (File->MapHandle != EMPTY_HANDLE_VALUE) {
-        SystemCloseFileMapView(
-            File->MapHandle,
-            File->Data.Str,
-            Rng(0ULL, File->Data.Size)
-        );
-        SystemCloseFileMap(File->MapHandle);
-        SystemCloseFile(File->FileHandle);
-    }
 }
 
 // NOTE(nc): all the lanes do one flight at a time. the bake has one shared
@@ -524,11 +484,7 @@ CLIConvertFlights(Arena* MemPool)
                     "%S.tmp",
                     PRINT_STR(Flight->FLIPath)
                 );
-                Str8List FileBlobs = FLIFileBlobsFromSectionBundle(
-                    Scratch.MemPool,
-                    &Bundle
-                );
-                b32 IsWritten = WriteFileContents(TempPath, FileBlobs);
+                b32 IsWritten = FLIWriteSectionBundle(TempPath, &Bundle);
 
                 if (IsWritten)
                     IsWritten = SystemMoveFile(Flight->FLIPath, TempPath);
@@ -552,7 +508,7 @@ CLIConvertFlights(Arena* MemPool)
                     );
                 }
 
-                CLIFileClose(BINFile);
+                UnmapFileContents(BINFile->Mapped);
             }
 
             LaneSync();
@@ -581,37 +537,16 @@ CLIOpenFlights(void)
         if (Flight->HasFailed || !Flight->HasFLI)
             continue;
 
-        FLIParseStatus Status = FLI_PARSE_STATUS_HEADER_MISMATCH;
-
-        Flight->File = SystemOpenFile(
+        Flight->Mapped = MapFileContents(
             SYS_ACCESS_READ | SYS_ACCESS_SHARE_READ,
             Flight->FLIPath
         );
 
-        if (Flight->File != EMPTY_HANDLE_VALUE) {
-            FileProperties Props = SystemGetFileProperties(Flight->File);
-
-            Flight->FileMap = SystemOpenFileMap(
-                SYS_ACCESS_READ,
-                Flight->File
-            );
-
-            if (Flight->FileMap != EMPTY_HANDLE_VALUE) {
-                Flight->FileBase = SystemOpenFileMapView(
-                    Flight->FileMap,
-                    SYS_ACCESS_READ,
-                    Rng(0ULL, Props.Size)
-                );
-            }
-
-            if (Flight->FileBase) {
-                Status = FLIParse(
-                    (u8*) Flight->FileBase,
-                    Props.Size,
-                    &Flight->FLI
-                );
-            }
-        }
+        FLIParseStatus Status = FLIParse(
+            Flight->Mapped.Data.Str,
+            Flight->Mapped.Data.Size,
+            &Flight->FLI
+        );
 
         if (Status == FLI_PARSE_STATUS_SUCCESS) {
             Flight->Key.U64[0] = Hash(Flight->FLIPath);
@@ -2199,11 +2134,7 @@ CLIGraphImage(
             Image,
             Mask,
             Vec(Plot.X0, Plot.Y0),
-            FLAPRasterPixelFromColour(
-                FLAP_RASTER_CURVE_COLOUR_TABLE[
-                    CurveIndex % FLAP_RASTER_CURVE_COLOURS
-                ]
-            )
+            FLAPGraphMinimapPixel(Data.Curves[CurveIndex].Colour)
         );
     }
 
@@ -2732,8 +2663,6 @@ CLITabAnalysis(
     return Result;
 }
 
-// NOTE(nc): the file is made with another name and moved, as
-//         : CLIExportDirective does.
 INTERNAL b32
 CLIExportTab(
     Arena* MemPool,
@@ -2741,37 +2670,20 @@ CLIExportTab(
     FLAPRasterImage* Tab,
     Str8 FilePath
 ) {
-    b32 Result = FALSE;
     u64 Position = ArenaGetPosition(MemPool);
-    Str8 TempPath = ArenaPushStrFmt(MemPool, "%S.tmp", PRINT_STR(FilePath));
-    FLAPExportWriter Writer = {};
+    FLAPExportWriter Writer = FLAPExportOpen(MemPool, FilePath, Chunk);
+    FLAPExportSource Source = {};
 
-    Writer.File = SystemOpenFile(SYS_ACCESS_WRITE, TempPath);
+    Source.Pixels = (u8*) Tab->Pixels;
+    Source.Size = Vec((i32) Tab->Width, (i32) Tab->Height);
 
-    if (Writer.File != EMPTY_HANDLE_VALUE) {
-        FLAPExportSource Source = {};
+    b32 Result = FLAP_EXPORT_FUNC_NAME(PNG)(MemPool, &Source, &Writer);
 
-        Writer.Capacity = FLAP_EXPORT_CHUNK_SIZE;
-        Writer.Chunk = Chunk;
-        Source.Pixels = (u8*) Tab->Pixels;
-        Source.Size = Vec((i32) Tab->Width, (i32) Tab->Height);
-        Result = FLAP_EXPORT_FUNC_NAME(PNG)(MemPool, &Source, &Writer);
-        FLAPExportFlush(&Writer);
-        Result = (Result && !Writer.HasFailed);
-        SystemCloseFile(Writer.File);
-
-        if (Result)
-            Result = SystemMoveFile(FilePath, TempPath);
-
-        if (!Result)
-            SystemDeleteFile(TempPath);
-    }
-
+    Result = FLAPExportClose(&Writer, Result);
     ArenaPopTo(MemPool, Position);
 
     return Result;
 }
-
 INTERNAL b32
 CLIExportGraphImage(
     Arena* MemPool,
@@ -2813,8 +2725,7 @@ CLIExportGraphImage(
 
 // NOTE(nc): the lines of the writes of a program, in the order of the
 //         : source. a write that is missing, or is in a branch that was
-//         : not taken, has no line. the file is made with another name
-//         : and moved, as CLIExportDirective does.
+//         : not taken, has no line.
 INTERNAL b32
 CLIExportWrites(
     Arena* MemPool,
@@ -2823,51 +2734,31 @@ CLIExportWrites(
     FLVRenderItem const* Items,
     Str8 FilePath
 ) {
-    b32 Result = FALSE;
     u64 Position = ArenaGetPosition(MemPool);
-    Str8 TempPath = ArenaPushStrFmt(MemPool, "%S.tmp", PRINT_STR(FilePath));
-    FLAPExportWriter Writer = {};
+    FLAPExportWriter Writer = FLAPExportOpen(MemPool, FilePath, Chunk);
 
-    Writer.File = SystemOpenFile(SYS_ACCESS_WRITE, TempPath);
+    for (u32 Index = 0; Index < P->EmitCount; ++Index) {
+        FLVRenderItem const* Item = &Items[Index];
 
-    if (Writer.File != EMPTY_HANDLE_VALUE) {
-        Writer.Capacity = FLAP_EXPORT_CHUNK_SIZE;
-        Writer.Chunk = Chunk;
-
-        for (u32 Index = 0; Index < P->EmitCount; ++Index) {
-            FLVRenderItem const* Item = &Items[Index];
-
-            if (
-                P->Emits[Index].DisplayKind != TOKEN_KIND_WRITE ||
-                Item->IsMissing ||
-                Item->Kind != FLV_RENDER_KIND_TEXT
-            ) {
-                continue;
-            }
-
-            FLAPExportWrite(&Writer, Item->Text);
-            FLAPExportWrite(&Writer, "\n"_s8);
+        if (
+            P->Emits[Index].DisplayKind != TOKEN_KIND_WRITE ||
+            Item->IsMissing ||
+            Item->Kind != FLV_RENDER_KIND_TEXT
+        ) {
+            continue;
         }
 
-        FLAPExportFlush(&Writer);
-        Result = !Writer.HasFailed;
-        SystemCloseFile(Writer.File);
-
-        if (Result)
-            Result = SystemMoveFile(FilePath, TempPath);
-
-        if (!Result)
-            SystemDeleteFile(TempPath);
+        FLAPExportWrite(&Writer, Item->Text);
+        FLAPExportWrite(&Writer, "\n"_s8);
     }
+
+    b32 Result = FLAPExportClose(&Writer, TRUE);
 
     ArenaPopTo(MemPool, Position);
 
     return Result;
 }
 
-// NOTE(nc): the file is made with another name and is moved to its name
-//         : when it is whole, so a run that is stopped leaves no result
-//         : that looks fresh.
 INTERNAL b32
 CLIExportDirective(
     Arena* MemPool,
@@ -2884,53 +2775,14 @@ CLIExportDirective(
 ) {
     b32 Result = FALSE;
     u64 Position = ArenaGetPosition(MemPool);
-    Str8 TempPath = ArenaPushStrFmt(MemPool, "%S.tmp", PRINT_STR(FilePath));
-    FLAPExportWriter Writer = {};
+    FLAPExportWriter Writer = FLAPExportOpen(MemPool, FilePath, Chunk);
 
-    Writer.File = SystemOpenFile(SYS_ACCESS_WRITE, TempPath);
+    switch (P->Emits[Head].DisplayKind) {
+        default: {} break;
 
-    if (Writer.File != EMPTY_HANDLE_VALUE) {
-        Writer.Capacity = FLAP_EXPORT_CHUNK_SIZE;
-        Writer.Chunk = Chunk;
-
-        switch (P->Emits[Head].DisplayKind) {
-            default: {} break;
-
-            case TOKEN_KIND_GRAPH: {
-                if (CLI_SHARED->IsGraphCSV) {
-                    Result = CLIExportGraph(
-                        MemPool,
-                        &Writer,
-                        Acc,
-                        Flight,
-                        FLI,
-                        P,
-                        Items,
-                        Head,
-                        Tail
-                    );
-                } else {
-                    Result = CLIExportGraphImage(
-                        MemPool,
-                        &Writer,
-                        Canvas,
-                        Acc,
-                        Flight,
-                        FLI,
-                        P,
-                        Items,
-                        Head,
-                        Tail
-                    );
-                }
-            } break;
-
-            case TOKEN_KIND_FLAG: {
-                Result = CLIExportFlag(MemPool, &Writer, &Items[Head]);
-            } break;
-
-            case TOKEN_KIND_TABLE: {
-                Result = CLIExportTable(
+        case TOKEN_KIND_GRAPH: {
+            if (CLI_SHARED->IsGraphCSV) {
+                Result = CLIExportGraph(
                     MemPool,
                     &Writer,
                     Acc,
@@ -2941,24 +2793,42 @@ CLIExportDirective(
                     Head,
                     Tail
                 );
-            } break;
+            } else {
+                Result = CLIExportGraphImage(
+                    MemPool,
+                    &Writer,
+                    Canvas,
+                    Acc,
+                    Flight,
+                    FLI,
+                    P,
+                    Items,
+                    Head,
+                    Tail
+                );
+            }
+        } break;
 
-            case TOKEN_KIND_WRITE: {
-                Result = CLIExportWrite(&Writer, &Items[Head]);
-            } break;
-        }
+        case TOKEN_KIND_FLAG: {
+            Result = CLIExportFlag(MemPool, &Writer, &Items[Head]);
+        } break;
 
-        FLAPExportFlush(&Writer);
-        Result = (Result && !Writer.HasFailed);
-        SystemCloseFile(Writer.File);
-
-        if (Result)
-            Result = SystemMoveFile(FilePath, TempPath);
-
-        if (!Result)
-            SystemDeleteFile(TempPath);
+        case TOKEN_KIND_TABLE: {
+            Result = CLIExportTable(
+                MemPool,
+                &Writer,
+                Acc,
+                Flight,
+                FLI,
+                P,
+                Items,
+                Head,
+                Tail
+            );
+        } break;
     }
 
+    Result = FLAPExportClose(&Writer, Result);
     ArenaPopTo(MemPool, Position);
 
     return Result;
@@ -3017,8 +2887,7 @@ CLIFlightUnpack(Arena* MemPool, CLIFlight* Flight, u64 const* Needed)
         if (
             !FLVMaskBit(Needed, Index) ||
             S->Encoding != FLI_SECTION_ENCODING_LZB ||
-            !S->EncodedSize ||
-            S->Offset + S->EncodedSize > Src->RawDataSize
+            !S->EncodedSize
         ) {
             continue;
         }
@@ -3036,12 +2905,44 @@ CLIFlightUnpack(Arena* MemPool, CLIFlight* Flight, u64 const* Needed)
 
     return Result;
 }
-// NOTE(nc): a lane takes one flight. it looks first at which programs are
-//         : fresh, and a flight with none to run is not unpacked. the arena
-//         : goes back to where it was after the flight.
+
+// NOTE(nc): a lane takes one flight and one FLV at a time. it looks first
+//         : at which programs are fresh, and with none to run nothing is
+//         : unpacked. the sections that are unpacked are the ones that
+//         : FLV reads. the arena goes back to where it was after the task.
 INTERNAL void
 CLIRunFlights(Arena* MemPool)
 {
+    if (!LaneIndex()) {
+        CLI_SHARED->RunTasks = ArenaPushArray(
+            CLI_SHARED->MemPool,
+            CLIRunTask,
+            CLI_SHARED->FlightsCount * CLI_SHARED->ScriptsCount
+        );
+
+        for (u64 Index = 0; Index < CLI_SHARED->FlightsCount; ++Index) {
+            CLIFlight* Flight = CLI_SHARED->Flights[Index];
+
+            if (!Flight->IsOpen)
+                continue;
+
+            for (CLIScript* S = CLI_SHARED->HeadScript; S; S = S->Next) {
+                if (!S->Unit || S->Unit->HasError)
+                    continue;
+
+                CLIRunTask* Task = &CLI_SHARED->RunTasks[
+                    CLI_SHARED->RunTasksCount++
+                ];
+
+                Task->Flight = Flight;
+                Task->Script = S;
+                Task->FlightIndex = Index;
+            }
+        }
+    }
+
+    LaneSync();
+
     // NOTE(nc): the run has its own arena, as it has in the app. the
     //         : results go to the arena of the lane.
     Arena* RunMemPool = ArenaAlloc();
@@ -3063,53 +2964,36 @@ CLIRunFlights(Arena* MemPool)
     }
 
     for (;;) {
-        u64 Index = AtomicIncFetchU64(
-            &CLI_SHARED->FlightTakeCounter,
+        u64 TaskIndex = AtomicIncFetchU64(
+            &CLI_SHARED->RunTakeCounter,
             MEM_ORDER_SEQ_CST
         ) - 1;
 
-        if (Index >= CLI_SHARED->FlightsCount)
+        if (TaskIndex >= CLI_SHARED->RunTasksCount)
             break;
 
-        CLIFlight* Flight = CLI_SHARED->Flights[Index];
-
-        if (!Flight->IsOpen)
-            continue;
-
-        u64 FlightPosition = ArenaGetPosition(MemPool);
-        b32* IsFresh = ArenaPushArrayZero(
-            MemPool,
-            b32,
-            CLI_SHARED->ProgramsCount
-        );
-        u64 Slot = 0;
+        CLIRunTask* Task = &CLI_SHARED->RunTasks[TaskIndex];
+        CLIFlight* Flight = Task->Flight;
+        CLIScript* S = Task->Script;
+        FLVUnit* Unit = S->Unit;
+        u32 ProgramCount = Unit->Lowered.ProgramCount;
+        u64 TaskPosition = ArenaGetPosition(MemPool);
+        b32* IsFresh = ArenaPushArrayZero(MemPool, b32, ProgramCount);
         u64 FreshCount = 0;
 
-        for (CLIScript* S = CLI_SHARED->HeadScript; S; S = S->Next) {
-            FLVUnit* Unit = S->Unit;
+        // NOTE(nc): the picture of the tab is made from all the programs
+        //         : of its FLV, so when it is stale none of them is fresh.
+        b32 IsTabStale = !CLITabIsFresh(MemPool, Flight, S);
 
-            if (!Unit || Unit->HasError)
-                continue;
-
-            // NOTE(nc): the picture of the tab is made from all the
-            //         : programs of its FLV, so when it is not fresh none
-            //         : of them is.
-            b32 IsTabFresh = CLITabIsFresh(MemPool, Flight, S);
-
-            for (
-                u32 Program = 0;
-                Program < Unit->Lowered.ProgramCount;
-                ++Program, ++Slot
-            ) {
-                IsFresh[Slot] = IsTabFresh && CLIProgramIsFresh(
-                    MemPool,
-                    Flight,
-                    S,
-                    Program,
-                    &Unit->Lowered.Program[Program]
-                );
-                FreshCount += !!IsFresh[Slot];
-            }
+        for (u32 Program = 0; Program < ProgramCount; ++Program) {
+            IsFresh[Program] = !IsTabStale && CLIProgramIsFresh(
+                MemPool,
+                Flight,
+                S,
+                Program,
+                &Unit->Lowered.Program[Program]
+            );
+            FreshCount += !!IsFresh[Program];
         }
 
         AtomicAddFetchU64(
@@ -3118,24 +3002,18 @@ CLIRunFlights(Arena* MemPool)
             MEM_ORDER_SEQ_CST
         );
 
-        if (FreshCount == CLI_SHARED->ProgramsCount) {
-            ArenaPopTo(MemPool, FlightPosition);
+        if (FreshCount == ProgramCount) {
+            ArenaPopTo(MemPool, TaskPosition);
             continue;
         }
 
         // NOTE(nc): the slots are bound on the flight as it is mapped. the
         //         : columns they name are the sections to unpack.
-        FLVBoundSlot** Bounds = ArenaPushArrayZero(
-            MemPool,
-            FLVBoundSlot*,
-            CLI_SHARED->ScriptsCount
-        );
         u64* Needed = ArenaPushArrayZero(
             MemPool,
             u64,
             FLVSeriesWordCount(Flight->FLI.SectionsCount)
         );
-        u64 ScriptIndex = 0;
 
         for (
             u64 Section = 0;
@@ -3145,220 +3023,114 @@ CLIRunFlights(Arena* MemPool)
             Needed[Section >> 6] |= 1ULL << (Section & 63);
         }
 
-        Slot = 0;
+        FLVBoundSlot* Bound = FLVBindSlots(
+            MemPool,
+            &Flight->FLI,
+            Unit->Slots,
+            Unit->SlotNames,
+            Unit->SlotsCount
+        );
 
-        for (
-            CLIScript* S = CLI_SHARED->HeadScript;
-            S;
-            S = S->Next, ++ScriptIndex
-        ) {
-            FLVUnit* Unit = S->Unit;
-            b32 HasStale = FALSE;
+        CLIMarkSections(Needed, &Flight->FLI, Bound, Unit->SlotsCount);
 
-            if (!Unit || Unit->HasError)
-                continue;
+        FLIParsed FLI = CLIFlightUnpack(MemPool, Flight, Needed);
+        b32 IsTabReady = TRUE;
+        r2i32* TabRects = NULL;
 
-            for (
-                u32 Program = 0;
-                Program < Unit->Lowered.ProgramCount;
-                ++Program, ++Slot
-            ) {
-                HasStale |= !IsFresh[Slot];
-            }
-
-            if (!HasStale)
-                continue;
-
-            Bounds[ScriptIndex] = FLVBindSlots(
+        if (IsTabStale) {
+            TabRects = CLITabRects(
                 MemPool,
-                &Flight->FLI,
-                Unit->Slots,
-                Unit->SlotNames,
-                Unit->SlotsCount
+                Unit,
+                Vec((i32) Tab.Width, (i32) Tab.Height)
             );
-            CLIMarkSections(
-                Needed,
-                &Flight->FLI,
-                Bounds[ScriptIndex],
-                Unit->SlotsCount
+            FLAPRasterFill(
+                &Tab,
+                Rng(0, 0, (i32) Tab.Width, (i32) Tab.Height),
+                FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_PLOT)
             );
         }
 
-        FLIParsed FLI = CLIFlightUnpack(MemPool, Flight, Needed);
-
-        Slot = 0;
-        ScriptIndex = 0;
-
-        for (
-            CLIScript* S = CLI_SHARED->HeadScript;
-            S;
-            S = S->Next, ++ScriptIndex
-        ) {
-            FLVUnit* Unit = S->Unit;
-
-            if (!Unit || Unit->HasError)
+        for (u32 Program = 0; Program < ProgramCount; ++Program) {
+            if (IsFresh[Program])
                 continue;
 
-            FLVBoundSlot* Bound = Bounds[ScriptIndex];
+            u64 Position = ArenaGetPosition(MemPool);
+            Access* Acc = AccessOpen();
+            FLVProgram const* P = &Unit->Lowered.Program[Program];
+            FLVLane Lane = {};
+            u32 Ordinal = 0;
 
-            // NOTE(nc): no slots were bound, so all its programs are fresh
-            if (!Bound) {
-                Slot += Unit->Lowered.ProgramCount;
-                continue;
-            }
+            FLVLaneInit(
+                &Lane,
+                Acc,
+                RunMemPool,
+                MemPool,
+                P,
+                Flight->Key,
+                &FLI,
+                Bound,
+                Unit->SlotsCount,
+                (u32) Task->FlightIndex,
+                U64_MAX
+            );
+            FLVLaneRun(&Lane);
 
-            // NOTE(nc): the tab is stale, so all the programs run, and
-            //         : each one draws its analyses in the image.
-            u64 ScriptPosition = ArenaGetPosition(MemPool);
-            b32 IsTabStale = !CLITabIsFresh(MemPool, Flight, S);
-            b32 IsTabReady = TRUE;
-            r2i32* TabRects = NULL;
+            for (u32 Head = 0; Head < P->EmitCount; ++Ordinal) {
+                u32 Tail = CLIDirectiveTail(P, Head);
 
-            if (IsTabStale) {
-                TabRects = CLITabRects(
-                    MemPool,
-                    Unit,
-                    Vec((i32) Tab.Width, (i32) Tab.Height)
-                );
-                FLAPRasterFill(
-                    &Tab,
-                    Rng(0, 0, (i32) Tab.Width, (i32) Tab.Height),
-                    FLAPRasterPixelFromColour(FLAP_RASTER_COLOUR_PLOT)
-                );
-            }
-
-            for (
-                u32 Program = 0;
-                Program < Unit->Lowered.ProgramCount;
-                ++Program, ++Slot
-            ) {
-                if (IsFresh[Slot])
-                    continue;
-
-                u64 Position = ArenaGetPosition(MemPool);
-                Access* Acc = AccessOpen();
-                FLVProgram const* P = &Unit->Lowered.Program[Program];
-                FLVLane Lane = {};
-                u32 Ordinal = 0;
-
-                FLVLaneInit(
-                    &Lane,
-                    Acc,
-                    RunMemPool,
-                    MemPool,
-                    P,
-                    Flight->Key,
-                    &FLI,
-                    Bound,
-                    Unit->SlotsCount,
-                    (u32) Index,
-                    U64_MAX
-                );
-                FLVLaneRun(&Lane);
-
-                for (u32 Head = 0; Head < P->EmitCount; ++Ordinal) {
-                    u32 Tail = CLIDirectiveTail(P, Head);
-
-                    // NOTE(nc): the writes go to the file of the program
-                    if (P->Emits[Head].DisplayKind == TOKEN_KIND_WRITE) {
-                        Head = Tail;
-                        continue;
-                    }
-
-                    Str8 Path = CLIDirectivePath(
-                        MemPool,
-                        Flight,
-                        S,
-                        Program,
-                        P,
-                        Head,
-                        Ordinal
-                    );
-                    b32 IsWritten = CLIExportDirective(
-                        MemPool,
-                        Chunk,
-                        &Canvas,
-                        Acc,
-                        Flight,
-                        &FLI,
-                        P,
-                        Lane.Items,
-                        Head,
-                        Tail,
-                        Path
-                    );
-
-                    if (IsWritten) {
-                        AtomicIncFetchU64(
-                            &CLI_SHARED->ExportedCount,
-                            MEM_ORDER_SEQ_CST
-                        );
-                    } else {
-                        AtomicIncFetchU64(
-                            &CLI_SHARED->FailCount,
-                            MEM_ORDER_SEQ_CST
-                        );
-                        PrintErr("failed to write %S\n", PRINT_STR(Path));
-                    }
-
+                // NOTE(nc): the writes go to the file of the program
+                if (P->Emits[Head].DisplayKind == TOKEN_KIND_WRITE) {
                     Head = Tail;
+                    continue;
                 }
 
-                if (CLIProgramHasWrites(P)) {
-                    Str8 Path = CLIWritesPath(MemPool, Flight, S, Program);
-                    b32 IsWritten = CLIExportWrites(
-                        MemPool,
-                        Chunk,
-                        P,
-                        Lane.Items,
-                        Path
+                Str8 Path = CLIDirectivePath(
+                    MemPool,
+                    Flight,
+                    S,
+                    Program,
+                    P,
+                    Head,
+                    Ordinal
+                );
+                b32 IsWritten = CLIExportDirective(
+                    MemPool,
+                    Chunk,
+                    &Canvas,
+                    Acc,
+                    Flight,
+                    &FLI,
+                    P,
+                    Lane.Items,
+                    Head,
+                    Tail,
+                    Path
+                );
+
+                if (IsWritten) {
+                    AtomicIncFetchU64(
+                        &CLI_SHARED->ExportedCount,
+                        MEM_ORDER_SEQ_CST
                     );
-
-                    if (IsWritten) {
-                        AtomicIncFetchU64(
-                            &CLI_SHARED->ExportedCount,
-                            MEM_ORDER_SEQ_CST
-                        );
-                    } else {
-                        AtomicIncFetchU64(
-                            &CLI_SHARED->FailCount,
-                            MEM_ORDER_SEQ_CST
-                        );
-                        PrintErr("failed to write %S\n", PRINT_STR(Path));
-                    }
-                }
-
-                for (
-                    u32 Node = 0;
-                    IsTabStale && Node < Unit->Lowered.LayoutCount;
-                    ++Node
-                ) {
-                    if (Unit->Lowered.Layout[Node].AnalysisIndex != Program)
-                        continue;
-
-                    IsTabReady &= CLITabAnalysis(
-                        MemPool,
-                        &Tab,
-                        Acc,
-                        Flight,
-                        &FLI,
-                        Unit,
-                        Node,
-                        Lane.Items,
-                        TabRects[Node]
+                } else {
+                    AtomicIncFetchU64(
+                        &CLI_SHARED->FailCount,
+                        MEM_ORDER_SEQ_CST
                     );
+                    PrintErr("failed to write %S\n", PRINT_STR(Path));
                 }
 
-                AccessClose(Acc);
-                ArenaPopTo(MemPool, Position);
-                ArenaClear(RunMemPool);
+                Head = Tail;
             }
 
-            if (IsTabStale) {
-                Str8 Path = CLITabPath(MemPool, Flight, S);
-                b32 IsWritten = (
-                    IsTabReady &&
-                    CLIExportTab(MemPool, Chunk, &Tab, Path)
+            if (CLIProgramHasWrites(P)) {
+                Str8 Path = CLIWritesPath(MemPool, Flight, S, Program);
+                b32 IsWritten = CLIExportWrites(
+                    MemPool,
+                    Chunk,
+                    P,
+                    Lane.Items,
+                    Path
                 );
 
                 if (IsWritten) {
@@ -3375,10 +3147,54 @@ CLIRunFlights(Arena* MemPool)
                 }
             }
 
-            ArenaPopTo(MemPool, ScriptPosition);
+            for (
+                u32 Node = 0;
+                IsTabStale && Node < Unit->Lowered.LayoutCount;
+                ++Node
+            ) {
+                if (Unit->Lowered.Layout[Node].AnalysisIndex != Program)
+                    continue;
+
+                IsTabReady &= CLITabAnalysis(
+                    MemPool,
+                    &Tab,
+                    Acc,
+                    Flight,
+                    &FLI,
+                    Unit,
+                    Node,
+                    Lane.Items,
+                    TabRects[Node]
+                );
+            }
+
+            AccessClose(Acc);
+            ArenaPopTo(MemPool, Position);
+            ArenaClear(RunMemPool);
         }
 
-        ArenaPopTo(MemPool, FlightPosition);
+        if (IsTabStale) {
+            Str8 Path = CLITabPath(MemPool, Flight, S);
+            b32 IsWritten = (
+                IsTabReady &&
+                CLIExportTab(MemPool, Chunk, &Tab, Path)
+            );
+
+            if (IsWritten) {
+                AtomicIncFetchU64(
+                    &CLI_SHARED->ExportedCount,
+                    MEM_ORDER_SEQ_CST
+                );
+            } else {
+                AtomicIncFetchU64(
+                    &CLI_SHARED->FailCount,
+                    MEM_ORDER_SEQ_CST
+                );
+                PrintErr("failed to write %S\n", PRINT_STR(Path));
+            }
+        }
+
+        ArenaPopTo(MemPool, TaskPosition);
     }
 
     ArenaRelease(RunMemPool);

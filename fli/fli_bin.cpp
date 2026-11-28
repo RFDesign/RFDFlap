@@ -557,6 +557,8 @@ struct B2FShared {
     u64            TaskTakeCounter;
     u64            StartTimeUS;
     MD5Hash        SourceMD5;
+    Str8           MD5Data;
+    Handle         MD5Thread;
     FLIBakeParams* Result;
     f64            OriginLat;
     f64            OriginLng;
@@ -644,6 +646,21 @@ B2FParamPrev(B2FParamSlot* Slots, u64 SlotsCount, Str8 Name, f32 Value)
     return Result;
 }
 
+// NOTE(nc): the MD5 is one thread of work, and for a large file it is
+//         : the longest job. it has a thread of its own, so the lanes
+//         : scan and gather beside it.
+void
+B2FMD5ThreadEntryPoint(void* __Params)
+{
+    B2FShared* Shared = (B2FShared*) __Params;
+
+    ThreadSetName("[B2F_MD5]"_s8);
+
+    PROFILE(B2FMD5Timer) {
+        Shared->SourceMD5 = MD5FromStr(Shared->MD5Data);
+    }
+}
+
 FLIBakeParams
 B2FConvert(Arena* MemPool, B2FConvertParams* Params)
 {
@@ -673,18 +690,14 @@ B2FConvert(Arena* MemPool, B2FConvertParams* Params)
             BIN_TYPE_COUNT
         );
         Shared->Result = ArenaPushArrayZero(MemPool, FLIBakeParams, 1);
+        Shared->MD5Data = Params->InputBINData;
+        Shared->MD5Thread = ThreadLaunch(B2FMD5ThreadEntryPoint, Shared);
     }
 
     LaneSyncU64(&Shared, 0);
 
     B2FFormat* Formats = Shared->Formats;
     FLIBakeParams* Result = Shared->Result;
-
-    if (LaneIndex() == LaneFromTaskIndex(1)) {
-        PROFILE(B2FMD5Timer) {
-            Shared->SourceMD5 = MD5FromStr(Params->InputBINData);
-        }
-    }
 
     if (!LaneIndex()) {
         PROFILE(B2FScanTimer) {
@@ -1302,21 +1315,6 @@ B2FConvert(Arena* MemPool, B2FConvertParams* Params)
 
     LaneSync();
 
-    if (!LaneIndex()) {
-        STATIC_ASSERT(
-            sizeof(Result->FileInfo.SourceMD5) == sizeof(Shared->SourceMD5),
-            MD5SizeCheck
-        );
-
-        MemCpy(
-            &Result->FileInfo.SourceMD5,
-            &Shared->SourceMD5,
-            sizeof(Result->FileInfo.SourceMD5)
-        );
-    }
-
-    LaneSync();
-
     PROFILE(B2FGatherTimer) {
         for (;;) {
             u64 TaskIndex = AtomicIncFetchU64(
@@ -1600,6 +1598,22 @@ B2FConvert(Arena* MemPool, B2FConvertParams* Params)
 
             ReleaseScratch(DerivedScratch);
         }
+    }
+
+    // NOTE(nc): the gather of this lane is done. it waits for the MD5
+    //         : here, while the other lanes are still in theirs.
+    if (!LaneIndex()) {
+        STATIC_ASSERT(
+            sizeof(Result->FileInfo.SourceMD5) == sizeof(Shared->SourceMD5),
+            MD5SizeCheck
+        );
+
+        ThreadJoin(Shared->MD5Thread, U64_MAX);
+        MemCpy(
+            &Result->FileInfo.SourceMD5,
+            &Shared->SourceMD5,
+            sizeof(Result->FileInfo.SourceMD5)
+        );
     }
 
     LaneSync();

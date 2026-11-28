@@ -190,7 +190,7 @@ SystemWriteFile(Handle FileHandle, r1u64 FileRange, void* Contents)
         SrcOffset += BytesWritten;
         DstOffset += BytesWritten;
 
-        if (!AmountRemaining)
+        if (SrcOffset >= BytesToWrite)
             break;
     }
 

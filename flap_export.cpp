@@ -39,6 +39,48 @@ FLAPExportFlush(FLAPExportWriter* Writer)
     }
 }
 
+// NOTE(nc): the file is made with another name. a file that is not
+//         : opened has a writer that has failed, so the writes to it
+//         : do nothing and FLAPExportClose is FALSE.
+INTERNAL FLAPExportWriter
+FLAPExportOpen(Arena* MemPool, Str8 FilePath, u8* Chunk)
+{
+    FLAPExportWriter Result = {};
+
+    Result.FilePath = FilePath;
+    Result.TempPath = ArenaPushStrFmt(
+        MemPool,
+        "%S.tmp",
+        PRINT_STR(FilePath)
+    );
+    Result.File = SystemOpenFile(SYS_ACCESS_WRITE, Result.TempPath);
+    Result.Chunk = Chunk;
+    Result.Capacity = FLAP_EXPORT_CHUNK_SIZE;
+    Result.HasFailed = (Result.File == EMPTY_HANDLE_VALUE);
+
+    return Result;
+}
+
+// NOTE(nc): the file is moved to its name when it is whole, so a file
+//         : that is not whole is never at its name.
+INTERNAL b32
+FLAPExportClose(FLAPExportWriter* Writer, b32 IsOk)
+{
+    FLAPExportFlush(Writer);
+
+    b32 Result = (IsOk && !Writer->HasFailed);
+
+    SystemCloseFile(Writer->File);
+
+    if (Result)
+        Result = SystemMoveFile(Writer->FilePath, Writer->TempPath);
+
+    if (!Result)
+        SystemDeleteFile(Writer->TempPath);
+
+    return Result;
+}
+
 INTERNAL void
 FLAPExportWrite(FLAPExportWriter* Writer, Str8 String)
 {
@@ -202,33 +244,19 @@ FLAPExport(FLAPExportKind Kind, FLAPExportSource const* Source, Str8 FilePath)
 
     if (Kind < FLAP_EXPORT_KIND_COUNT && FLAP_EXPORT_KIND_FUNC_TABLE[Kind]) {
         TempArena Scratch = GetScratch(NULL, 0);
-        FLAPExportWriter Writer = {};
+        FLAPExportWriter Writer = FLAPExportOpen(
+            Scratch.MemPool,
+            FilePath,
+            ArenaPushArray(Scratch.MemPool, u8, FLAP_EXPORT_CHUNK_SIZE)
+        );
 
-        Writer.File = SystemOpenFile(SYS_ACCESS_WRITE, FilePath);
-
-        if (Writer.File != EMPTY_HANDLE_VALUE) {
-            Writer.Capacity = FLAP_EXPORT_CHUNK_SIZE;
-            Writer.Chunk = ArenaPushArray(
+        PROFILE(FLAPExportTimer) {
+            Result = FLAP_EXPORT_KIND_FUNC_TABLE[Kind](
                 Scratch.MemPool,
-                u8,
-                Writer.Capacity
+                Source,
+                &Writer
             );
-
-            PROFILE(FLAPExportTimer) {
-                Result = FLAP_EXPORT_KIND_FUNC_TABLE[Kind](
-                    Scratch.MemPool,
-                    Source,
-                    &Writer
-                );
-                FLAPExportFlush(&Writer);
-                Result = (Result && !Writer.HasFailed);
-            }
-
-            SystemCloseFile(Writer.File);
-
-            // NOTE(nc): a file that is not whole is not left on the disk
-            if (!Result)
-                SystemDeleteFile(FilePath);
+            Result = FLAPExportClose(&Writer, Result);
         }
 
         if (!Result) {

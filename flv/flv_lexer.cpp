@@ -1010,8 +1010,8 @@ LexTripleCharSymbol(v256* CurrentVec, v256* NextVec, v256* Tags)
     );
 
     const u8 PunctuationData[2][3] = {
-        {1, 1, 1},      // <<=
-        {2, 2, 1}       // >>=
+        {0, 0, 0},      // <<=
+        {1, 1, 0}       // >>=
     };
     u32 Mask = 0;
 

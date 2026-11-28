@@ -43,9 +43,7 @@ struct CLIFlight {
     u64           FLISize;
     WallClockTime BINTime;
     WallClockTime FLITime;
-    Handle        File;
-    Handle        FileMap;
-    void*         FileBase;
+    MappedFile    Mapped;
     FLIParsed     FLI;
     FLIKey        Key;
     b32           HasFLI;
@@ -62,6 +60,12 @@ struct CLIScript {
     Str8**        DirectiveNames;
     WallClockTime Time;
     WallClockTime SourceTime;
+};
+
+struct CLIRunTask {
+    CLIFlight* Flight;
+    CLIScript* Script;
+    u64        FlightIndex;
 };
 
 struct CLIGraphTicks {
@@ -88,7 +92,9 @@ struct CLIShared {
     Str8Array       SearchPaths;
     Str8            GraphFontPath;
     FLAPRasterFont* GraphFont;
-    u64             FlightTakeCounter;
+    CLIRunTask*     RunTasks;
+    u64             RunTasksCount;
+    u64             RunTakeCounter;
     u64             ProgramsCount;
     u64             ExportedCount;
     u64             FreshCount;

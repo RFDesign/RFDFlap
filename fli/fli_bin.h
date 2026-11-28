@@ -127,5 +127,6 @@ struct B2FFormat {
 
 // @functions__________________________________________________________________
 FLIBakeParams B2FConvert(Arena* MemPool, B2FConvertParams* Params);
+void B2FMD5ThreadEntryPoint(void* __Params);
 
 #endif // __FLI_BIN_H__

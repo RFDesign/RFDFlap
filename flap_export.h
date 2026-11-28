@@ -28,17 +28,12 @@ enum : u32 {
     FLAP_EXPORT_KIND_COUNT
 };
 
-// NOTE(nc): an export function makes the bytes of the file, as a list of
-//         : blobs in MemPool. it does not open a file. FLAPExport writes
-//         : the blobs, so a large export is never one string.
-#define FLAP_EXPORT_FUNC_DEF(X) b32 X(Arena* MemPool, FLAPExportSource const* Source, FLAPExportWriter* Writer)
+#define FLAP_EXPORT_FUNC_DEF(X)  b32 X(Arena* MemPool, FLAPExportSource const* Source, FLAPExportWriter* Writer)
 #define FLAP_EXPORT_FUNC_NAME(X) __FlapExportFunc##X
-#define FLAP_EXPORT_FUNC_SIG(X) FLAP_EXPORT_FUNC_DEF(FLAP_EXPORT_FUNC_NAME(X))
+#define FLAP_EXPORT_FUNC_SIG(X)  FLAP_EXPORT_FUNC_DEF(FLAP_EXPORT_FUNC_NAME(X))
 typedef FLAP_EXPORT_FUNC_DEF(FLAPExportFuncType);
 
 // @types______________________________________________________________________
-// NOTE(nc): what there is to export. an export function reads the part
-//         : that is for its kind. Pixels is RGBA, the top row first.
 struct FLAPExportSource {
     u8*              Pixels;
     FLAPTableParams* Table;
@@ -47,6 +42,8 @@ struct FLAPExportSource {
 
 struct FLAPExportWriter {
     Handle File;
+    Str8   FilePath;
+    Str8   TempPath;
     u8*    Chunk;
     u64    Size;
     u64    Capacity;
@@ -62,6 +59,8 @@ extern Str8 FLAP_EXPORT_KIND_EXTENSION_TABLE[FLAP_EXPORT_KIND_COUNT];
 extern FLAPExportFuncType* FLAP_EXPORT_KIND_FUNC_TABLE[FLAP_EXPORT_KIND_COUNT];
 
 // @functions__________________________________________________________________
+FLAPExportWriter FLAPExportOpen(Arena* MemPool, Str8 FilePath, u8* Chunk);
+b32 FLAPExportClose(FLAPExportWriter* Writer, b32 IsOkay);
 void FLAPExportFlush(FLAPExportWriter* Writer);
 void FLAPExportWrite(FLAPExportWriter* Writer, Str8 String);
 u8* FLAPExportReserve(FLAPExportWriter* Writer, u64 Size);
